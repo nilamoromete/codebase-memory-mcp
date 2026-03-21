@@ -1464,8 +1464,66 @@ static const char *related_file_primary_relationship(const file_context_related_
     return best;
 }
 
+static void append_test_reason(yyjson_mut_doc *doc, yyjson_mut_val *target, int direct_tests,
+                               int file_tests) {
+    if (direct_tests > 0 && file_tests > 0) {
+        yyjson_mut_obj_add_str(doc, target, "reason", "Direct TESTS and TESTS_FILE edges");
+    } else if (direct_tests > 0) {
+        yyjson_mut_obj_add_str(doc, target, "reason", "Direct TESTS edge");
+    } else {
+        yyjson_mut_obj_add_str(doc, target, "reason", "Direct TESTS_FILE edge");
+    }
+}
+
 static void append_test_command_hints(yyjson_mut_doc *doc, yyjson_mut_val *data,
                                       const test_recommendation_t *tests, int test_count, int limit) {
+    yyjson_mut_val *hints = yyjson_mut_arr(doc);
+    bool all_go = test_count > 0;
+    bool all_py = test_count > 0;
+
+    for (int i = 0; i < test_count && i < limit; i++) {
+        all_go = all_go && str_ends_with(tests[i].path, "_test.go");
+        all_py = all_py && str_ends_with(tests[i].path, ".py");
+    }
+
+    if (test_count > 0) {
+        yyjson_mut_val *hint = yyjson_mut_obj(doc);
+        if (all_go) {
+            yyjson_mut_obj_add_str(doc, hint, "runner", "go");
+            yyjson_mut_obj_add_str(doc, hint, "command", "go test ./...");
+        } else if (all_py) {
+            size_t command_cap = 1024;
+            char *command = calloc(command_cap, 1);
+            if (command) {
+                snprintf(command, command_cap, "pytest");
+                for (int i = 0; i < test_count && i < limit; i++) {
+                    size_t need = strlen(command) + strlen(tests[i].path) + 4;
+                    if (need >= command_cap) {
+                        command_cap *= 2;
+                        command = safe_realloc(command, command_cap);
+                    }
+                    strcat(command, " ");
+                    strcat(command, tests[i].path);
+                }
+                strcat(command, " -q");
+                yyjson_mut_obj_add_str(doc, hint, "runner", "pytest");
+                yyjson_mut_obj_add_strcpy(doc, hint, "command", command);
+                free(command);
+            }
+        } else {
+            yyjson_mut_obj_add_str(doc, hint, "runner", "unknown");
+            yyjson_mut_obj_add_str(doc, hint, "command",
+                                   "Run the project test runner for the listed test files.");
+        }
+        yyjson_mut_arr_add_val(hints, hint);
+    }
+
+    yyjson_mut_obj_add_val(doc, data, "test_command_hints", hints);
+}
+
+static void append_file_context_test_command_hints(yyjson_mut_doc *doc, yyjson_mut_val *data,
+                                                   const file_context_test_t *tests, int test_count,
+                                                   int limit) {
     yyjson_mut_val *hints = yyjson_mut_arr(doc);
     bool all_go = test_count > 0;
     bool all_py = test_count > 0;
@@ -2031,34 +2089,8 @@ static char *handle_get_file_context(cbm_mcp_server_t *srv, const char *args) {
         yyjson_mut_val *item = yyjson_mut_obj(doc);
         yyjson_mut_obj_add_str(doc, item, "path", related[i].path);
         yyjson_mut_obj_add_real(doc, item, "score", normalize_score(related[i].score, 12));
-        yyjson_mut_val *types = yyjson_mut_arr(doc);
-        if (related[i].callers > 0) {
-            yyjson_mut_arr_add_str(doc, types, "CALLS_IN");
-        }
-        if (related[i].callees > 0) {
-            yyjson_mut_arr_add_str(doc, types, "CALLS_OUT");
-        }
-        if (related[i].imports > 0) {
-            yyjson_mut_arr_add_str(doc, types, "IMPORTS");
-        }
-        if (related[i].tests > 0) {
-            yyjson_mut_arr_add_str(doc, types, "TESTS");
-        }
-        if (related[i].cochanges > 0) {
-            yyjson_mut_arr_add_str(doc, types, "FILE_CHANGES_WITH");
-        }
-        yyjson_mut_obj_add_val(doc, item, "relationship_types", types);
-        if (related[i].callers > 0) {
-            yyjson_mut_obj_add_str(doc, item, "reason", "Direct caller file dependency.");
-        } else if (related[i].tests > 0) {
-            yyjson_mut_obj_add_str(doc, item, "reason", "Direct test relationship.");
-        } else if (related[i].imports > 0) {
-            yyjson_mut_obj_add_str(doc, item, "reason", "File import relationship.");
-        } else if (related[i].cochanges > 0) {
-            yyjson_mut_obj_add_str(doc, item, "reason", "Historical co-change relationship.");
-        } else {
-            yyjson_mut_obj_add_str(doc, item, "reason", "Symbol-level call relationship.");
-        }
+        append_related_file_relationship_types(doc, item, &related[i]);
+        append_related_file_reason(doc, item, &related[i]);
         yyjson_mut_arr_add_val(related_arr, item);
     }
     yyjson_mut_obj_add_val(doc, data, "related_files", related_arr);
@@ -2078,59 +2110,16 @@ static char *handle_get_file_context(cbm_mcp_server_t *srv, const char *args) {
     yyjson_mut_obj_add_val(doc, data, "callers", callers_arr);
 
     yyjson_mut_val *tests_arr = yyjson_mut_arr(doc);
-    bool all_go_tests = test_count > 0;
-    bool all_py_tests = test_count > 0;
     for (int i = 0; i < test_count && i < max_tests; i++) {
         yyjson_mut_val *item = yyjson_mut_obj(doc);
         yyjson_mut_obj_add_str(doc, item, "path", tests[i].path);
         yyjson_mut_obj_add_real(doc, item, "score", normalize_score(tests[i].score, 10));
         yyjson_mut_obj_add_str(doc, item, "tier", detect_test_tier(tests[i].path));
-        if (tests[i].direct_tests > 0 && tests[i].file_tests > 0) {
-            yyjson_mut_obj_add_str(doc, item, "reason", "Direct TESTS and TESTS_FILE edges");
-        } else if (tests[i].direct_tests > 0) {
-            yyjson_mut_obj_add_str(doc, item, "reason", "Direct TESTS edge");
-        } else {
-            yyjson_mut_obj_add_str(doc, item, "reason", "Direct TESTS_FILE edge");
-        }
-        all_go_tests = all_go_tests && str_ends_with(tests[i].path, "_test.go");
-        all_py_tests = all_py_tests && str_ends_with(tests[i].path, ".py");
+        append_test_reason(doc, item, tests[i].direct_tests, tests[i].file_tests);
         yyjson_mut_arr_add_val(tests_arr, item);
     }
     yyjson_mut_obj_add_val(doc, data, "tests", tests_arr);
-
-    yyjson_mut_val *hints = yyjson_mut_arr(doc);
-    if (test_count > 0) {
-        yyjson_mut_val *hint = yyjson_mut_obj(doc);
-        if (all_go_tests) {
-            yyjson_mut_obj_add_str(doc, hint, "runner", "go");
-            yyjson_mut_obj_add_str(doc, hint, "command", "go test ./...");
-        } else if (all_py_tests) {
-            size_t command_cap = 1024;
-            char *command = calloc(command_cap, 1);
-            if (command) {
-                snprintf(command, command_cap, "pytest");
-                for (int i = 0; i < test_count && i < max_tests; i++) {
-                    size_t need = strlen(command) + strlen(tests[i].path) + 4;
-                    if (need >= command_cap) {
-                        command_cap *= 2;
-                        command = safe_realloc(command, command_cap);
-                    }
-                    strcat(command, " ");
-                    strcat(command, tests[i].path);
-                }
-                strcat(command, " -q");
-                yyjson_mut_obj_add_str(doc, hint, "runner", "pytest");
-                yyjson_mut_obj_add_strcpy(doc, hint, "command", command);
-                free(command);
-            }
-        } else {
-            yyjson_mut_obj_add_str(doc, hint, "runner", "unknown");
-            yyjson_mut_obj_add_str(doc, hint, "command",
-                                   "Run the project test runner for the listed test files.");
-        }
-        yyjson_mut_arr_add_val(hints, hint);
-    }
-    yyjson_mut_obj_add_val(doc, data, "test_command_hints", hints);
+    append_file_context_test_command_hints(doc, data, tests, test_count, max_tests);
 
     yyjson_mut_val *pitfalls = yyjson_mut_arr(doc);
     if (inbound_calls_total > 0) {
@@ -2619,21 +2608,13 @@ static char *handle_get_tests(cbm_mcp_server_t *srv, const char *args) {
     yyjson_mut_obj_add_val(doc, data, "targets", targets);
 
     yyjson_mut_val *tests_arr = yyjson_mut_arr(doc);
-    bool all_go = test_count > 0;
-    bool all_py = test_count > 0;
     for (int i = 0; i < test_count && i < limit; i++) {
         yyjson_mut_val *item = yyjson_mut_obj(doc);
         yyjson_mut_obj_add_str(doc, item, "path", tests[i].path);
         yyjson_mut_obj_add_real(doc, item, "score", normalize_score(tests[i].score, 10));
         yyjson_mut_obj_add_str(doc, item, "tier", detect_test_tier(tests[i].path));
         if (include_reasons) {
-            if (tests[i].direct_tests > 0 && tests[i].file_tests > 0) {
-                yyjson_mut_obj_add_str(doc, item, "reason", "Direct TESTS and TESTS_FILE edges");
-            } else if (tests[i].direct_tests > 0) {
-                yyjson_mut_obj_add_str(doc, item, "reason", "Direct TESTS edge");
-            } else {
-                yyjson_mut_obj_add_str(doc, item, "reason", "Direct TESTS_FILE edge");
-            }
+            append_test_reason(doc, item, tests[i].direct_tests, tests[i].file_tests);
         }
         yyjson_mut_val *covers = yyjson_mut_arr(doc);
         for (int c = 0; c < tests[i].cover_count; c++) {
@@ -2641,44 +2622,10 @@ static char *handle_get_tests(cbm_mcp_server_t *srv, const char *args) {
         }
         yyjson_mut_obj_add_val(doc, item, "covers", covers);
         yyjson_mut_arr_add_val(tests_arr, item);
-
-        all_go = all_go && str_ends_with(tests[i].path, "_test.go");
-        all_py = all_py && str_ends_with(tests[i].path, ".py");
     }
     yyjson_mut_obj_add_val(doc, data, "tests", tests_arr);
 
-    yyjson_mut_val *hints = yyjson_mut_arr(doc);
-    if (test_count > 0) {
-        yyjson_mut_val *hint = yyjson_mut_obj(doc);
-        if (all_go) {
-            yyjson_mut_obj_add_str(doc, hint, "runner", "go");
-            yyjson_mut_obj_add_str(doc, hint, "command", "go test ./...");
-        } else if (all_py) {
-            size_t command_cap = 1024;
-            char *command = calloc(command_cap, 1);
-            if (command) {
-                snprintf(command, command_cap, "pytest");
-                for (int i = 0; i < test_count && i < limit; i++) {
-                    size_t need = strlen(command) + strlen(tests[i].path) + 4;
-                    if (need >= command_cap) {
-                        command_cap *= 2;
-                        command = safe_realloc(command, command_cap);
-                    }
-                    strcat(command, " ");
-                    strcat(command, tests[i].path);
-                }
-                strcat(command, " -q");
-                yyjson_mut_obj_add_str(doc, hint, "runner", "pytest");
-                yyjson_mut_obj_add_strcpy(doc, hint, "command", command);
-                free(command);
-            }
-        } else {
-            yyjson_mut_obj_add_str(doc, hint, "runner", "unknown");
-            yyjson_mut_obj_add_str(doc, hint, "command", "Run the project test runner for the listed test files.");
-        }
-        yyjson_mut_arr_add_val(hints, hint);
-    }
-    yyjson_mut_obj_add_val(doc, data, "test_command_hints", hints);
+    append_test_command_hints(doc, data, tests, test_count, limit);
     yyjson_mut_obj_add_val(doc, root, "data", data);
 
     char *json = yy_doc_to_str(doc);
@@ -3442,13 +3389,7 @@ static char *handle_get_change_risks(cbm_mcp_server_t *srv, const char *args) {
             yyjson_mut_obj_add_str(doc, item, "path", tests[i].path);
             yyjson_mut_obj_add_real(doc, item, "score", normalize_score(tests[i].score, 10));
             yyjson_mut_obj_add_str(doc, item, "tier", detect_test_tier(tests[i].path));
-            if (tests[i].direct_tests > 0 && tests[i].file_tests > 0) {
-                yyjson_mut_obj_add_str(doc, item, "reason", "Direct TESTS and TESTS_FILE edges");
-            } else if (tests[i].direct_tests > 0) {
-                yyjson_mut_obj_add_str(doc, item, "reason", "Direct TESTS edge");
-            } else {
-                yyjson_mut_obj_add_str(doc, item, "reason", "Direct TESTS_FILE edge");
-            }
+            append_test_reason(doc, item, tests[i].direct_tests, tests[i].file_tests);
             yyjson_mut_arr_add_val(tests_arr, item);
         }
     }
