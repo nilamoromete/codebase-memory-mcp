@@ -89,6 +89,22 @@ codebase-memory-mcp update
 
 The MCP server also checks for updates on startup and notifies on the first tool call if a newer release is available.
 
+### Measure Workflow Performance
+
+To measure the workflow-level gain from `get_edit_plan` versus the older multi-call flow:
+
+```bash
+scripts/benchmark-edit-plan.sh build/c/codebase-memory-mcp . src/cli/cli.c
+```
+
+The script indexes the repo, then compares:
+
+- legacy multi-call flow: `get_file_context` + `get_related_files` + `get_tests` + `get_change_risks`
+- `get_edit_plan(mode="compact", task_type="fix")`
+- `get_edit_plan(mode="detailed", task_type="fix")`
+
+It reports tool-call count, total elapsed time, and response bytes so you can measure workflow efficiency directly.
+
 ### Uninstall
 
 ```bash
