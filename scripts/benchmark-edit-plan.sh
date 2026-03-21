@@ -54,7 +54,30 @@ fi
 TMP_JSON="$(mktemp)"
 trap 'rm -f "$TMP_JSON"' EXIT
 
-"$BINARY" cli index_repository "{\"repo_path\":\"$REPO_PATH\"}" > "$TMP_JSON"
+INDEX_STDERR="$(mktemp)"
+trap 'rm -f "$TMP_JSON" "$INDEX_STDERR"' EXIT
+
+"$BINARY" cli index_repository "{\"repo_path\":\"$REPO_PATH\"}" > "$TMP_JSON" 2> "$INDEX_STDERR"
+
+INDEX_STATUS="$(
+"${PYTHON_CMD[@]}" - "$TMP_JSON" <<'PY'
+import json, sys
+with open(sys.argv[1], 'r', encoding='utf-8') as f:
+    outer = json.load(f)
+inner = json.loads(outer["content"][0]["text"])
+print(inner.get("status", ""))
+PY
+)"
+
+if [ "$INDEX_STATUS" != "indexed" ]; then
+    echo "error: index_repository did not complete successfully (status=$INDEX_STATUS)"
+    if [ -s "$INDEX_STDERR" ]; then
+        echo "--- index stderr ---"
+        cat "$INDEX_STDERR"
+        echo "--- end index stderr ---"
+    fi
+    exit 1
+fi
 
 PROJECT="$(
 "${PYTHON_CMD[@]}" - "$TMP_JSON" <<'PY'
