@@ -4,17 +4,21 @@ This project has a code knowledge graph available via MCP tools. Use it for
 structural questions instead of grep — one graph query returns what would take
 dozens of file-by-file searches.
 
-## Finding Code
+## Preferred Workflow
 
-- "Who calls X?" → use `trace_call_path` with `direction=inbound`
-- "What does X call?" → use `trace_call_path` with `direction=outbound`
-- "Find functions matching pattern" → use `search_graph` with `name_pattern`
-- "Find all routes" → use `search_graph` with `label=Route`
-- "Show codebase structure" → use `get_graph_schema` for overview
+- Before editing a file → use `get_edit_plan(mode="compact", task_type="fix")`
+- Before structural cleanup → use `get_edit_plan(mode="compact", task_type="refactor")`
+- Before diagnosis-first work → use `get_edit_plan(mode="compact", task_type="investigate")`
+- If you need more granular per-file detail → use `get_file_context`
+- To inspect nearby blast radius → use `get_related_files`
+- To identify likely tests → use `get_tests`
+- To understand inbound callers → use `get_callers`
+- After a multi-file change → use `get_change_risks`
 
 ## Tracing Dependencies
 
-- Always discover exact names first: `search_graph(name_pattern=".*Partial.*")`
+- Always start with the high-level tools above, then go deeper if needed
+- Discover exact names with `search_graph(name_pattern=".*Partial.*")`
 - Then trace: `trace_call_path(function_name="ExactName", direction="both")`
 - Cross-service HTTP calls: `query_graph("MATCH (a)-[r:HTTP_CALLS]->(b) RETURN a.name, b.name, r.url_path")`
 - Read source: `get_code_snippet(qualified_name="project.path.FunctionName")`
@@ -28,6 +32,7 @@ dozens of file-by-file searches.
 ## Important
 
 - Always check `list_projects` first — run `index_repository` if the project is missing
+- Prefer `get_edit_plan(mode="compact")` / `get_change_risks` before falling back to graph-native tools
 - Use `search_graph` to discover exact names before `trace_call_path` (it requires exact match)
 - The graph doesn't index text content — use grep for string literals, error messages, config values
 - Results default to 10 per page — check `has_more` and use `offset` to paginate

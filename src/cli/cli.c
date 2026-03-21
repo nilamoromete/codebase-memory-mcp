@@ -262,8 +262,9 @@ static const char skill_exploring_content[] =
     "name: codebase-memory-exploring\n"
     "description: Codebase knowledge graph expert. ALWAYS invoke this skill when the user "
     "explores code, searches for functions/classes/routes, asks about architecture, or needs "
-    "codebase orientation. Do not use Grep, Glob, or file search directly — use "
-    "codebase-memory-mcp search_graph and get_architecture first.\n"
+    "codebase orientation. Do not start with grep/glob for structural questions — prefer the "
+    "high-level context tools first, then fall back to graph primitives only when you need "
+    "deeper inspection.\n"
     "---\n"
     "\n"
     "# Codebase Exploration\n"
@@ -271,12 +272,20 @@ static const char skill_exploring_content[] =
     "Use codebase-memory-mcp tools to explore the codebase:\n"
     "\n"
     "## Workflow\n"
-    "1. `get_graph_schema` — understand what node/edge types exist\n"
-    "2. `search_graph` — find functions, classes, routes by pattern\n"
-    "3. `get_code_snippet` — read specific function implementations\n"
-    "4. `get_architecture` — get high-level project summary\n"
+    "1. `get_edit_plan` — start with a single pre-edit plan for a file (prefer `mode=\"compact\"`)\n"
+    "2. `get_file_context` — fall back to granular file context when needed\n"
+    "3. `get_related_files` — expand the local blast radius around a file\n"
+    "4. `get_graph_schema` — understand available node and edge types\n"
+    "5. `search_graph` — find functions, classes, routes by pattern\n"
+    "6. `get_code_snippet` — read specific function implementations\n"
+    "7. `get_architecture` — get high-level project summary\n"
     "\n"
     "## Tips\n"
+    "- Use `get_edit_plan(path=\"...\", mode=\"compact\", task_type=\"fix\")` before bug-fix edits\n"
+    "- Use `get_edit_plan(path=\"...\", mode=\"compact\", task_type=\"refactor\")` before structural cleanup\n"
+    "- Use `get_edit_plan(path=\"...\", mode=\"compact\", task_type=\"investigate\")` before diagnosis work\n"
+    "- Use `get_file_context(path=\"...\")` when you need more raw detail than the edit plan\n"
+    "- Use `get_tests(paths=[...])` before declaring a change safe\n"
     "- Use `search_graph(name_pattern=\".*Pattern.*\")` for fuzzy matching\n"
     "- Use `search_graph(label=\"Route\")` to find HTTP routes\n"
     "- Use `search_graph(label=\"Function\", file_pattern=\"*.go\")` to scope by language\n";
@@ -295,10 +304,12 @@ static const char skill_tracing_content[] =
     "Use codebase-memory-mcp tools to trace call paths:\n"
     "\n"
     "## Workflow\n"
-    "1. `search_graph(name_pattern=\".*FuncName.*\")` — find exact function name\n"
+    "1. `get_callers(symbol=\"FuncName\")` — get inbound callers quickly\n"
     "2. `trace_call_path(function_name=\"FuncName\", direction=\"both\")` — trace callers + "
-    "callees\n"
-    "3. `detect_changes` — find what changed and assess risk_labels\n"
+    "callees when you need deeper traversal\n"
+    "3. `get_change_risks(paths=[...])` — estimate blast radius for an edit set\n"
+    "4. `detect_changes` — use git diff driven impact analysis when you explicitly need working tree "
+    "or branch change detection\n"
     "\n"
     "## Direction Options\n"
     "- `inbound` — who calls this function?\n"
@@ -336,10 +347,16 @@ static const char skill_reference_content[] =
     "\n"
     "# Codebase Memory MCP Reference\n"
     "\n"
-    "## 14 total MCP Tools\n"
+    "## 20 total MCP Tools\n"
     "- `index_repository` — index a project\n"
     "- `index_status` — check indexing progress\n"
     "- `detect_changes` — find what changed since last index\n"
+    "- `get_edit_plan` — single pre-edit plan for a file (`mode=\"compact\"` recommended)\n"
+    "- `get_file_context` — compact pre-edit file context for a file\n"
+    "- `get_related_files` — ranked neighboring files with relationship types\n"
+    "- `get_tests` — recommended tests for one or more files\n"
+    "- `get_callers` — inbound callers for a symbol or file\n"
+    "- `get_change_risks` — blast radius and regression-risk summary for a change set\n"
     "- `search_graph` — find nodes by pattern\n"
     "- `search_code` — text search in source\n"
     "- `query_graph` — Cypher query language\n"
@@ -369,13 +386,34 @@ static const char codex_instructions_content[] =
     "This project uses codebase-memory-mcp to maintain a knowledge graph of the codebase.\n"
     "Use the MCP tools to explore and understand the code:\n"
     "\n"
-    "- `search_graph` — find functions, classes, routes by pattern\n"
-    "- `trace_call_path` — trace who calls a function or what it calls\n"
-    "- `get_code_snippet` — read function source code\n"
-    "- `query_graph` — run Cypher queries for complex patterns\n"
-    "- `get_architecture` — high-level project summary\n"
+    "- `get_edit_plan` — start here before editing a file (`mode=\"compact\"` recommended)\n"
+    "- Pick `task_type=\"fix\"`, `\"refactor\"`, or `\"investigate\"` to match the current intent\n"
+    "- `get_file_context` — use when you need more granular per-file detail\n"
+    "- `get_related_files` — inspect local blast radius around a file\n"
+    "- `get_tests` — get the highest-value tests to run for edited files\n"
+    "- `get_callers` — identify inbound callers before changing behavior\n"
+    "- `get_change_risks` — summarize regression risk after multi-file edits\n"
+    "- `search_graph` / `trace_call_path` / `get_code_snippet` — use for deeper graph-native inspection\n"
     "\n"
-    "Always prefer graph tools over grep for code discovery.\n";
+    "Always prefer the high-level MCP tools first, then fall back to graph primitives or grep.\n";
+
+static const char gemini_instructions_content[] =
+    "# Codebase Knowledge Graph\n"
+    "\n"
+    "Use codebase-memory-mcp before broad file search when you work on this repository.\n"
+    "\n"
+    "Recommended order:\n"
+    "1. `get_edit_plan(mode=\"compact\", task_type=\"fix\")` before editing a file\n"
+    "2. `get_file_context` when you need more granular detail\n"
+    "3. `get_related_files` when you need nearby code and coupling\n"
+    "4. `get_tests` for validation planning\n"
+    "5. `get_callers` before behavior changes\n"
+    "6. `get_change_risks` after multi-file edits\n"
+    "\n"
+    "Use `task_type=\"refactor\"` for structural cleanup and `task_type=\"investigate\"` for diagnosis-first work.\n"
+    "\n"
+    "Then use `search_graph`, `trace_call_path`, `get_code_snippet`, or `query_graph` when deeper "
+    "structural detail is required.\n";
 
 static const cbm_skill_t skills[CBM_SKILL_COUNT] = {
     {"codebase-memory-exploring", skill_exploring_content},
@@ -390,6 +428,10 @@ const cbm_skill_t *cbm_get_skills(void) {
 
 const char *cbm_get_codex_instructions(void) {
     return codex_instructions_content;
+}
+
+const char *cbm_get_gemini_instructions(void) {
+    return gemini_instructions_content;
 }
 
 /* ── Recursive mkdir (via compat_fs) ──────────────────────────── */
@@ -903,11 +945,14 @@ static const char agent_instructions_content[] =
     "ALWAYS prefer MCP graph tools over grep/glob/file-search for code discovery.\n"
     "\n"
     "## Priority Order\n"
-    "1. `search_graph` — find functions, classes, routes, variables by pattern\n"
-    "2. `trace_call_path` — trace who calls a function or what it calls\n"
-    "3. `get_code_snippet` — read specific function/class source code\n"
-    "4. `query_graph` — run Cypher queries for complex patterns\n"
-    "5. `get_architecture` — high-level project summary\n"
+    "1. `get_edit_plan` — single pre-edit plan for a file (`mode=\"compact\"` recommended)\n"
+    "2. `get_file_context` — granular pre-edit context when needed\n"
+    "3. `get_related_files` — local blast radius and neighboring files\n"
+    "4. `get_tests` — recommended tests for the touched files\n"
+    "5. `get_callers` — inbound callers for a symbol or file\n"
+    "6. `get_change_risks` — regression-risk summary after multi-file edits\n"
+    "7. `search_graph` / `trace_call_path` / `get_code_snippet` — use when you need graph-native detail\n"
+    "8. `query_graph` / `get_architecture` — use for complex patterns or broad overviews\n"
     "\n"
     "## When to fall back to grep/glob\n"
     "- Searching for string literals, error messages, config values\n"
@@ -915,9 +960,11 @@ static const char agent_instructions_content[] =
     "- When MCP tools return insufficient results\n"
     "\n"
     "## Examples\n"
-    "- Find a handler: `search_graph(name_pattern=\".*OrderHandler.*\")`\n"
-    "- Who calls it: `trace_call_path(function_name=\"OrderHandler\", direction=\"inbound\")`\n"
-    "- Read source: `get_code_snippet(qualified_name=\"pkg/orders.OrderHandler\")`\n";
+    "- Before fixing `pkg/orders/service.go`: `get_edit_plan(path=\"pkg/orders/service.go\", mode=\"compact\", task_type=\"fix\")`\n"
+    "- Before refactoring `pkg/orders/service.go`: `get_edit_plan(path=\"pkg/orders/service.go\", mode=\"compact\", task_type=\"refactor\")`\n"
+    "- Before diagnosing `pkg/orders/service.go`: `get_edit_plan(path=\"pkg/orders/service.go\", mode=\"compact\", task_type=\"investigate\")`\n"
+    "- Who calls a symbol: `get_callers(symbol=\"OrderHandler\")`\n"
+    "- After changing multiple files: `get_change_risks(paths=[\"pkg/orders/service.go\",\"pkg/orders/http.go\"])`\n";
 
 const char *cbm_get_agent_instructions(void) {
     return agent_instructions_content;
@@ -2238,7 +2285,7 @@ int cbm_cmd_install(int argc, char **argv) {
         char instr_path[1024];
         snprintf(instr_path, sizeof(instr_path), "%s/.codex/AGENTS.md", home);
         if (!dry_run) {
-            cbm_upsert_instructions(instr_path, agent_instructions_content);
+            cbm_upsert_instructions(instr_path, codex_instructions_content);
         }
         printf("  instructions: %s\n", instr_path);
     }
@@ -2256,7 +2303,7 @@ int cbm_cmd_install(int argc, char **argv) {
         char instr_path[1024];
         snprintf(instr_path, sizeof(instr_path), "%s/.gemini/GEMINI.md", home);
         if (!dry_run) {
-            cbm_upsert_instructions(instr_path, agent_instructions_content);
+            cbm_upsert_instructions(instr_path, gemini_instructions_content);
         }
         printf("  instructions: %s\n", instr_path);
 
@@ -2314,7 +2361,7 @@ int cbm_cmd_install(int argc, char **argv) {
         char instr_path[1024];
         snprintf(instr_path, sizeof(instr_path), "%s/.gemini/antigravity/AGENTS.md", home);
         if (!dry_run) {
-            cbm_upsert_instructions(instr_path, agent_instructions_content);
+            cbm_upsert_instructions(instr_path, gemini_instructions_content);
         }
         printf("  instructions: %s\n", instr_path);
     }

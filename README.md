@@ -2,7 +2,7 @@
 
 **The fastest and most efficient code intelligence engine for AI coding agents.** Full-indexes an average repository in milliseconds, the Linux kernel (28M LOC, 75K files) in 3 minutes. Answers structural queries in under 1ms. Ships as a single static binary for macOS, Linux, and Windows — download, run `install`, done.
 
-High-quality parsing through [tree-sitter](https://tree-sitter.github.io/tree-sitter/) AST analysis across all 64 languages, enhanced with LSP-style hybrid type resolution for Go, C, and C++ (more languages coming soon) — producing a persistent knowledge graph of functions, classes, call chains, HTTP routes, and cross-service links. 14 MCP tools. Zero dependencies. Plug and play across 10 coding agents.
+High-quality parsing through [tree-sitter](https://tree-sitter.github.io/tree-sitter/) AST analysis across all 64 languages, enhanced with LSP-style hybrid type resolution for Go, C, and C++ (more languages coming soon) — producing a persistent knowledge graph of functions, classes, call chains, HTTP routes, and cross-service links. 20 MCP tools. Zero dependencies. Plug and play across 10 coding agents.
 
 <p align="center">
   <img src="docs/graph-ui-screenshot.png" alt="Graph visualization UI showing the codebase-memory-mcp knowledge graph" width="800">
@@ -18,7 +18,7 @@ High-quality parsing through [tree-sitter](https://tree-sitter.github.io/tree-si
 - **120x fewer tokens** — 5 structural queries: ~3,400 tokens vs ~412,000 via file-by-file search. One graph query replaces dozens of grep/read cycles.
 - **10 agents, one command** — `install` auto-detects Claude Code, Codex CLI, Gemini CLI, Zed, OpenCode, Antigravity, Aider, KiloCode, VS Code, and OpenClaw — configures MCP entries, instruction files, and pre-tool hooks for each.
 - **Built-in graph visualization** — 3D interactive UI at `localhost:9749` (optional UI binary variant).
-- **14 MCP tools** — search, trace, architecture, impact analysis, Cypher queries, dead code detection, cross-service HTTP linking, ADR management, and more.
+- **20 MCP tools** — high-level pre-edit planning, file context, blast-radius analysis, search, trace, architecture, impact analysis, Cypher queries, dead code detection, cross-service HTTP linking, ADR management, and more.
 
 ## Quick Start
 
@@ -36,6 +36,18 @@ High-quality parsing through [tree-sitter](https://tree-sitter.github.io/tree-si
 3. **Restart** your coding agent. Say **"Index this project"** — done.
 
 The `install` command auto-detects all installed coding agents and configures MCP server entries, instruction files, skills, and pre-tool hooks for each.
+
+### Recommended Agent Workflow
+
+For day-to-day coding, start with the high-level tools:
+
+1. `get_edit_plan(path="...", mode="compact", task_type="fix")`
+2. `get_edit_plan(path="...", mode="compact", task_type="refactor")`
+3. `get_edit_plan(path="...", mode="compact", task_type="investigate")`
+4. `get_change_risks(paths=[...])` after multi-file edits
+5. `get_file_context(path="...")` only when you need the raw composed detail
+
+This keeps token use low while still surfacing callers, tests, related files, risk factors, and safe next steps.
 
 ### Graph Visualization UI
 
@@ -76,6 +88,7 @@ Removes all agent configs, skills, hooks, and instructions. Does not remove the 
 ## Features
 
 - **Architecture overview**: `get_architecture` returns languages, packages, entry points, routes, hotspots, boundaries, layers, and clusters in a single call
+- **Pre-edit planning**: `get_edit_plan` composes file context and change-risk guidance into a single MCP call, with `mode="compact"` and `task_type` support for `fix`, `refactor`, and `investigate`
 - **Architecture Decision Records**: `manage_adr` persists architectural decisions across sessions
 - **Louvain community detection**: Discovers functional modules by clustering call edges
 - **Git diff impact mapping**: `detect_changes` maps uncommitted changes to affected symbols with risk classification
@@ -102,7 +115,7 @@ codebase-memory-mcp: executes graph query, returns structured results
 Agent: presents the call chain in plain English
 ```
 
-**Why no built-in LLM?** Other code graph tools embed an LLM for natural language → graph query translation. This means extra API keys, extra cost, and another model to configure. With MCP, the agent you're already talking to *is* the query translator.
+**Why no built-in LLM?** Other code graph tools embed an LLM for natural language → graph query translation. This means extra API keys, extra cost, and another model to configure. With MCP, the agent you're already talking to *is* the query translator. The new high-level tools (`get_edit_plan`, `get_file_context`, `get_change_risks`, `get_tests`, `get_callers`) are designed to keep that translation layer thin and deterministic.
 
 ## Performance
 
@@ -203,7 +216,7 @@ Add to `~/.claude/.mcp.json` (global) or project `.mcp.json`:
 }
 ```
 
-Restart your agent. Verify with `/mcp` — you should see `codebase-memory-mcp` with 14 tools.
+Restart your agent. Verify with `/mcp` — you should see `codebase-memory-mcp` with 20 tools.
 
 </details>
 
@@ -254,6 +267,12 @@ codebase-memory-mcp cli --raw search_graph '{"label": "Function"}' | jq '.result
 
 | Tool | Description |
 |------|-------------|
+| `get_edit_plan` | Single pre-edit plan for a file. Supports `mode="compact"` / `mode="detailed"` and `task_type="fix" | "refactor" | "investigate"`. |
+| `get_file_context` | Compact pre-edit file context for a file: symbols, callers, related files, tests, pitfalls. |
+| `get_related_files` | Ranked neighboring files with relationship types, reasons, and priority score. |
+| `get_tests` | Recommended tests for one or more files, including tier and test runner hints. |
+| `get_callers` | Inbound callers for a symbol or file, with file aggregation. |
+| `get_change_risks` | Blast radius and regression-risk summary for a change set. |
 | `search_graph` | Structured search by label, name pattern, file pattern, degree filters. Pagination via limit/offset. |
 | `trace_call_path` | BFS traversal — who calls a function and what it calls. Depth 1-5. |
 | `detect_changes` | Map git diff to affected symbols + blast radius with risk classification. |

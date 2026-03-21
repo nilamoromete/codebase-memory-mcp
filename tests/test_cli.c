@@ -558,7 +558,7 @@ TEST(cli_skill_files_content) {
             found_reference = true;
             ASSERT(strstr(sk[i].content, "query_graph") != NULL);
             ASSERT(strstr(sk[i].content, "Cypher") != NULL);
-            ASSERT(strstr(sk[i].content, "14 total") != NULL);
+            ASSERT(strstr(sk[i].content, "20 total") != NULL);
         }
     }
     ASSERT_TRUE(found_exploring);
@@ -573,7 +573,25 @@ TEST(cli_codex_instructions) {
     const char *instr = cbm_get_codex_instructions();
     ASSERT_NOT_NULL(instr);
     ASSERT(strstr(instr, "Codebase Knowledge Graph") != NULL);
+    ASSERT(strstr(instr, "get_edit_plan") != NULL);
+    ASSERT(strstr(instr, "mode=\"compact\"") != NULL);
+    ASSERT(strstr(instr, "task_type=\"fix\"") != NULL);
+    ASSERT(strstr(instr, "get_file_context") != NULL);
+    ASSERT(strstr(instr, "get_change_risks") != NULL);
     ASSERT(strstr(instr, "trace_call_path") != NULL);
+    PASS();
+}
+
+TEST(cli_gemini_instructions) {
+    const char *instr = cbm_get_gemini_instructions();
+    ASSERT_NOT_NULL(instr);
+    ASSERT(strstr(instr, "Codebase Knowledge Graph") != NULL);
+    ASSERT(strstr(instr, "Recommended order") != NULL);
+    ASSERT(strstr(instr, "get_edit_plan") != NULL);
+    ASSERT(strstr(instr, "mode=\"compact\"") != NULL);
+    ASSERT(strstr(instr, "task_type=\"fix\"") != NULL);
+    ASSERT(strstr(instr, "get_file_context") != NULL);
+    ASSERT(strstr(instr, "get_change_risks") != NULL);
     PASS();
 }
 
@@ -1114,6 +1132,221 @@ TEST(cli_install_and_uninstall) {
         snprintf(path, sizeof(path), "%s/%s", skills_dir, sk[i].name);
         struct stat st;
         ASSERT(stat(path, &st) != 0);
+    }
+
+    test_rmdir_r(tmpdir);
+    PASS();
+}
+
+TEST(cli_cmd_install_multi_client_smoke) {
+    char tmpdir[256]; snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-home-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        SKIP("cbm_mkdtemp failed");
+
+    char claude_dir[512];
+    char codex_dir[512];
+    char gemini_dir[512];
+    char bashrc[512];
+    snprintf(claude_dir, sizeof(claude_dir), "%s/.claude", tmpdir);
+    snprintf(codex_dir, sizeof(codex_dir), "%s/.codex", tmpdir);
+    snprintf(gemini_dir, sizeof(gemini_dir), "%s/.gemini", tmpdir);
+    snprintf(bashrc, sizeof(bashrc), "%s/.bashrc", tmpdir);
+    ASSERT_EQ(test_mkdirp(claude_dir), 0);
+    ASSERT_EQ(test_mkdirp(codex_dir), 0);
+    ASSERT_EQ(test_mkdirp(gemini_dir), 0);
+    ASSERT_EQ(write_test_file(bashrc, "# bashrc\n"), 0);
+
+    char *old_home = getenv("HOME") ? strdup(getenv("HOME")) : NULL;
+    char *old_shell = getenv("SHELL") ? strdup(getenv("SHELL")) : NULL;
+    char *old_path = getenv("PATH") ? strdup(getenv("PATH")) : NULL;
+
+    cbm_setenv("HOME", tmpdir, 1);
+    cbm_setenv("SHELL", "/bin/bash", 1);
+    cbm_setenv("PATH", "/nonexistent", 1);
+
+    char *argv[] = {"install"};
+    int rc = cbm_cmd_install(1, argv);
+    ASSERT_EQ(rc, 0);
+
+    char path[1024];
+    struct stat st;
+
+    snprintf(path, sizeof(path), "%s/.claude/skills/codebase-memory-exploring/SKILL.md", tmpdir);
+    ASSERT_EQ(stat(path, &st), 0);
+    const char *data = read_test_file(path);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "get_edit_plan") != NULL);
+    ASSERT(strstr(data, "mode=\"compact\"") != NULL);
+    ASSERT(strstr(data, "task_type=\"fix\"") != NULL);
+    ASSERT(strstr(data, "get_file_context") != NULL);
+
+    snprintf(path, sizeof(path), "%s/.claude/.mcp.json", tmpdir);
+    data = read_test_file(path);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "codebase-memory-mcp") != NULL);
+    ASSERT(strstr(data, ".local/bin/codebase-memory-mcp") != NULL);
+
+    snprintf(path, sizeof(path), "%s/.claude.json", tmpdir);
+    data = read_test_file(path);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "codebase-memory-mcp") != NULL);
+
+    snprintf(path, sizeof(path), "%s/.claude/settings.json", tmpdir);
+    data = read_test_file(path);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "PreToolUse") != NULL);
+    ASSERT(strstr(data, "codebase-memory-mcp") != NULL);
+
+    snprintf(path, sizeof(path), "%s/.codex/config.toml", tmpdir);
+    data = read_test_file(path);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "[mcp_servers.codebase-memory-mcp]") != NULL);
+    ASSERT(strstr(data, ".local/bin/codebase-memory-mcp") != NULL);
+
+    snprintf(path, sizeof(path), "%s/.codex/AGENTS.md", tmpdir);
+    data = read_test_file(path);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "get_edit_plan") != NULL);
+    ASSERT(strstr(data, "mode=\"compact\"") != NULL);
+    ASSERT(strstr(data, "task_type=\"fix\"") != NULL);
+    ASSERT(strstr(data, "get_file_context") != NULL);
+    ASSERT(strstr(data, "get_change_risks") != NULL);
+    ASSERT(strstr(data, "Recommended order") == NULL);
+
+    snprintf(path, sizeof(path), "%s/.gemini/settings.json", tmpdir);
+    data = read_test_file(path);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "mcpServers") != NULL);
+    ASSERT(strstr(data, "BeforeTool") != NULL);
+    ASSERT(strstr(data, "codebase-memory-mcp") != NULL);
+
+    snprintf(path, sizeof(path), "%s/.gemini/GEMINI.md", tmpdir);
+    data = read_test_file(path);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "Recommended order") != NULL);
+    ASSERT(strstr(data, "get_edit_plan") != NULL);
+    ASSERT(strstr(data, "mode=\"compact\"") != NULL);
+    ASSERT(strstr(data, "task_type=\"fix\"") != NULL);
+    ASSERT(strstr(data, "get_change_risks") != NULL);
+
+    data = read_test_file(bashrc);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, ".local/bin") != NULL);
+
+    if (old_home) {
+        cbm_setenv("HOME", old_home, 1);
+        free(old_home);
+    } else {
+        cbm_unsetenv("HOME");
+    }
+    if (old_shell) {
+        cbm_setenv("SHELL", old_shell, 1);
+        free(old_shell);
+    } else {
+        cbm_unsetenv("SHELL");
+    }
+    if (old_path) {
+        cbm_setenv("PATH", old_path, 1);
+        free(old_path);
+    } else {
+        cbm_unsetenv("PATH");
+    }
+
+    test_rmdir_r(tmpdir);
+    PASS();
+}
+
+TEST(cli_cmd_uninstall_multi_client_smoke) {
+    char tmpdir[256]; snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-home-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        SKIP("cbm_mkdtemp failed");
+
+    char claude_dir[512];
+    char codex_dir[512];
+    char gemini_dir[512];
+    char bashrc[512];
+    snprintf(claude_dir, sizeof(claude_dir), "%s/.claude", tmpdir);
+    snprintf(codex_dir, sizeof(codex_dir), "%s/.codex", tmpdir);
+    snprintf(gemini_dir, sizeof(gemini_dir), "%s/.gemini", tmpdir);
+    snprintf(bashrc, sizeof(bashrc), "%s/.bashrc", tmpdir);
+    ASSERT_EQ(test_mkdirp(claude_dir), 0);
+    ASSERT_EQ(test_mkdirp(codex_dir), 0);
+    ASSERT_EQ(test_mkdirp(gemini_dir), 0);
+    ASSERT_EQ(write_test_file(bashrc, "# bashrc\n"), 0);
+
+    char *old_home = getenv("HOME") ? strdup(getenv("HOME")) : NULL;
+    char *old_shell = getenv("SHELL") ? strdup(getenv("SHELL")) : NULL;
+    char *old_path = getenv("PATH") ? strdup(getenv("PATH")) : NULL;
+
+    cbm_setenv("HOME", tmpdir, 1);
+    cbm_setenv("SHELL", "/bin/bash", 1);
+    cbm_setenv("PATH", "/nonexistent", 1);
+
+    char *install_argv[] = {"install"};
+    ASSERT_EQ(cbm_cmd_install(1, install_argv), 0);
+
+    char *uninstall_argv[] = {"uninstall"};
+    ASSERT_EQ(cbm_cmd_uninstall(1, uninstall_argv), 0);
+
+    char path[1024];
+    struct stat st;
+    const char *data;
+
+    snprintf(path, sizeof(path), "%s/.claude/skills/codebase-memory-exploring/SKILL.md", tmpdir);
+    ASSERT(stat(path, &st) != 0);
+
+    snprintf(path, sizeof(path), "%s/.claude/.mcp.json", tmpdir);
+    data = read_test_file(path);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "codebase-memory-mcp") == NULL);
+
+    snprintf(path, sizeof(path), "%s/.claude.json", tmpdir);
+    data = read_test_file(path);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "codebase-memory-mcp") == NULL);
+
+    snprintf(path, sizeof(path), "%s/.claude/settings.json", tmpdir);
+    data = read_test_file(path);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "Grep|Glob|Read") == NULL);
+
+    snprintf(path, sizeof(path), "%s/.codex/config.toml", tmpdir);
+    data = read_test_file(path);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "[mcp_servers.codebase-memory-mcp]") == NULL);
+
+    snprintf(path, sizeof(path), "%s/.codex/AGENTS.md", tmpdir);
+    data = read_test_file(path);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "codebase-memory-mcp:start") == NULL);
+
+    snprintf(path, sizeof(path), "%s/.gemini/settings.json", tmpdir);
+    data = read_test_file(path);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "codebase-memory-mcp") == NULL);
+
+    snprintf(path, sizeof(path), "%s/.gemini/GEMINI.md", tmpdir);
+    data = read_test_file(path);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "codebase-memory-mcp:start") == NULL);
+
+    if (old_home) {
+        cbm_setenv("HOME", old_home, 1);
+        free(old_home);
+    } else {
+        cbm_unsetenv("HOME");
+    }
+    if (old_shell) {
+        cbm_setenv("SHELL", old_shell, 1);
+        free(old_shell);
+    } else {
+        cbm_unsetenv("SHELL");
+    }
+    if (old_path) {
+        cbm_setenv("PATH", old_path, 1);
+        free(old_path);
+    } else {
+        cbm_unsetenv("PATH");
     }
 
     test_rmdir_r(tmpdir);
@@ -2044,6 +2277,7 @@ SUITE(cli) {
     RUN_TEST(cli_remove_old_monolithic_skill);
     RUN_TEST(cli_skill_files_content);
     RUN_TEST(cli_codex_instructions);
+    RUN_TEST(cli_gemini_instructions);
 
     /* Editor MCP: Cursor/Windsurf/Gemini (5 tests — install_test.go) */
     RUN_TEST(cli_editor_mcp_install);
@@ -2080,8 +2314,10 @@ SUITE(cli) {
     RUN_TEST(cli_install_dry_run);
     RUN_TEST(cli_uninstall_dry_run);
 
-    /* Full lifecycle (1 test — cli_test.go) */
+    /* Full lifecycle (3 tests — cli_test.go + smoke install flow) */
     RUN_TEST(cli_install_and_uninstall);
+    RUN_TEST(cli_cmd_install_multi_client_smoke);
+    RUN_TEST(cli_cmd_uninstall_multi_client_smoke);
 
     /* YAML parser (7 unit tests) */
     RUN_TEST(cli_yaml_parse_simple);

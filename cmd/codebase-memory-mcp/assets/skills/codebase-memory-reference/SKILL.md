@@ -9,7 +9,7 @@ description: >
 
 # Codebase Memory MCP — Tool Reference
 
-## Tools (14 total)
+## Tools (20 total)
 
 | Tool | Purpose |
 |------|---------|
@@ -17,6 +17,12 @@ description: >
 | `index_status` | Check indexing status (ready/indexing/not found) |
 | `list_projects` | List all indexed projects with timestamps and counts |
 | `delete_project` | Remove a project from the graph |
+| `get_edit_plan` | Single pre-edit plan for a file (`mode="compact"` and `task_type` recommended) |
+| `get_file_context` | Compact pre-edit file context for a file |
+| `get_related_files` | Ranked neighboring files with relationship types |
+| `get_tests` | Recommended tests for one or more files |
+| `get_callers` | Inbound callers for a symbol or file |
+| `get_change_risks` | Blast radius and regression-risk summary for a change set |
 | `search_graph` | Structured search with filters (name, label, degree, file pattern) |
 | `search_code` | Grep-like text search within indexed project files |
 | `trace_call_path` | BFS call chain traversal (exact name match required). Supports `risk_labels=true` for impact classification. |
@@ -24,8 +30,6 @@ description: >
 | `query_graph` | Cypher-like graph queries (200-row cap) |
 | `get_graph_schema` | Node/edge counts, relationship patterns |
 | `get_code_snippet` | Read source code by qualified name |
-| `read_file` | Read any file from indexed project |
-| `list_directory` | List files/directories with glob filter |
 | `ingest_traces` | Ingest OpenTelemetry traces to validate HTTP_CALLS edges |
 
 ## Edge Types
@@ -143,6 +147,15 @@ search_code(pattern="(?i)(POST|PUT).*\\/api\\/v[0-9]\\/orders", regex=true)
 
 | Question | Use |
 |----------|-----|
+| What should I inspect before editing file X? | `get_edit_plan(mode="compact", task_type="fix")` |
+| Which files are nearest to X? | `get_related_files` |
+| Which tests should I run for these files? | `get_tests` |
+| Who calls symbol X? | `get_callers` |
+| What is the regression risk of my current edit set? | `get_change_risks` |
+| I need the full composed plan for file X | `get_edit_plan(mode="detailed", task_type="fix")` |
+| I am refactoring file X | `get_edit_plan(mode="compact", task_type="refactor")` |
+| I am investigating file X before editing | `get_edit_plan(mode="compact", task_type="investigate")` |
+| I need more granular raw context for file X | `get_file_context` |
 | Who calls X? | `trace_call_path(direction="inbound")` |
 | What does X call? | `trace_call_path(direction="outbound")` |
 | Full call context | `trace_call_path(direction="both")` |

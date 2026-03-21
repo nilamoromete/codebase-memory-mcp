@@ -182,10 +182,13 @@ int cbm_remove_gemini_hooks(const char *settings_path);
  * Checks if already present. Returns 0 on success, 1 if already present. */
 int cbm_ensure_path(const char *bin_dir, const char *rc_file, bool dry_run);
 
-/* ── Codex instructions (legacy, wraps cbm_get_agent_instructions) ── */
+/* ── Client-specific instructions ─────────────────────────────── */
 
 /* Get the Codex CLI instructions content. */
 const char *cbm_get_codex_instructions(void);
+
+/* Get the Gemini CLI instructions content. */
+const char *cbm_get_gemini_instructions(void);
 
 /* ── Tar.gz extraction ────────────────────────────────────────── */
 

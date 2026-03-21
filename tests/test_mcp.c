@@ -129,8 +129,14 @@ TEST(mcp_initialize_response) {
 TEST(mcp_tools_list) {
     char *json = cbm_mcp_tools_list();
     ASSERT_NOT_NULL(json);
-    /* Should contain all 14 tools */
+    /* Should contain all advertised tools */
     ASSERT_NOT_NULL(strstr(json, "index_repository"));
+    ASSERT_NOT_NULL(strstr(json, "get_file_context"));
+    ASSERT_NOT_NULL(strstr(json, "get_related_files"));
+    ASSERT_NOT_NULL(strstr(json, "get_tests"));
+    ASSERT_NOT_NULL(strstr(json, "get_callers"));
+    ASSERT_NOT_NULL(strstr(json, "get_change_risks"));
+    ASSERT_NOT_NULL(strstr(json, "get_edit_plan"));
     ASSERT_NOT_NULL(strstr(json, "search_graph"));
     ASSERT_NOT_NULL(strstr(json, "query_graph"));
     ASSERT_NOT_NULL(strstr(json, "trace_call_path"));
@@ -929,6 +935,624 @@ static char *call_snippet(cbm_mcp_server_t *srv, const char *args_json) {
     return text;
 }
 
+static cbm_mcp_server_t *setup_file_context_server(char *tmp_dir, size_t tmp_sz) {
+    snprintf(tmp_dir, tmp_sz, "/tmp/cbm_file_context_test_XXXXXX");
+    if (!cbm_mkdtemp(tmp_dir))
+        return NULL;
+
+    char proj_dir[512];
+    snprintf(proj_dir, sizeof(proj_dir), "%s/project", tmp_dir);
+    cbm_mkdir(proj_dir);
+
+    char main_path[512];
+    snprintf(main_path, sizeof(main_path), "%s/main.go", proj_dir);
+    FILE *main_fp = fopen(main_path, "w");
+    if (!main_fp)
+        return NULL;
+    fprintf(main_fp, "package main\n\nfunc HandleRequest() error {\n\treturn nil\n}\n");
+    fclose(main_fp);
+
+    char other_path[512];
+    snprintf(other_path, sizeof(other_path), "%s/other.go", proj_dir);
+    FILE *other_fp = fopen(other_path, "w");
+    if (!other_fp)
+        return NULL;
+    fprintf(other_fp, "package main\n\nfunc HelperCaller() {\n\tHandleRequest()\n}\n");
+    fclose(other_fp);
+
+    char test_path[512];
+    snprintf(test_path, sizeof(test_path), "%s/main_test.go", proj_dir);
+    FILE *test_fp = fopen(test_path, "w");
+    if (!test_fp)
+        return NULL;
+    fprintf(test_fp, "package main\n\nfunc TestHandleRequest(t *testing.T) {\n\tHandleRequest()\n}\n");
+    fclose(test_fp);
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    if (!srv)
+        return NULL;
+
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    if (!st) {
+        cbm_mcp_server_free(srv);
+        return NULL;
+    }
+
+    const char *proj_name = "test-project";
+    cbm_mcp_server_set_project(srv, proj_name);
+    cbm_store_upsert_project(st, proj_name, proj_dir);
+
+    cbm_node_t file_main = {0};
+    file_main.project = proj_name;
+    file_main.label = "File";
+    file_main.name = "main.go";
+    file_main.file_path = "main.go";
+    int64_t id_file_main = cbm_store_upsert_node(st, &file_main);
+
+    cbm_node_t file_other = {0};
+    file_other.project = proj_name;
+    file_other.label = "File";
+    file_other.name = "other.go";
+    file_other.file_path = "other.go";
+    int64_t id_file_other = cbm_store_upsert_node(st, &file_other);
+
+    cbm_node_t file_test = {0};
+    file_test.project = proj_name;
+    file_test.label = "File";
+    file_test.name = "main_test.go";
+    file_test.file_path = "main_test.go";
+    int64_t id_file_test = cbm_store_upsert_node(st, &file_test);
+
+    cbm_node_t fn_target = {0};
+    fn_target.project = proj_name;
+    fn_target.label = "Function";
+    fn_target.name = "HandleRequest";
+    fn_target.qualified_name = "test-project.main.HandleRequest";
+    fn_target.file_path = "main.go";
+    fn_target.start_line = 3;
+    fn_target.end_line = 5;
+    int64_t id_fn_target = cbm_store_upsert_node(st, &fn_target);
+
+    cbm_node_t fn_caller = {0};
+    fn_caller.project = proj_name;
+    fn_caller.label = "Function";
+    fn_caller.name = "HelperCaller";
+    fn_caller.qualified_name = "test-project.main.HelperCaller";
+    fn_caller.file_path = "other.go";
+    fn_caller.start_line = 3;
+    fn_caller.end_line = 5;
+    int64_t id_fn_caller = cbm_store_upsert_node(st, &fn_caller);
+
+    cbm_node_t fn_test = {0};
+    fn_test.project = proj_name;
+    fn_test.label = "Function";
+    fn_test.name = "TestHandleRequest";
+    fn_test.qualified_name = "test-project.main_test.TestHandleRequest";
+    fn_test.file_path = "main_test.go";
+    fn_test.start_line = 3;
+    fn_test.end_line = 5;
+    int64_t id_fn_test = cbm_store_upsert_node(st, &fn_test);
+
+    cbm_node_t route = {0};
+    route.project = proj_name;
+    route.label = "Route";
+    route.name = "GET /handle";
+    route.file_path = "main.go";
+    int64_t id_route = cbm_store_upsert_node(st, &route);
+
+    cbm_edge_t call_edge = {
+        .project = proj_name, .source_id = id_fn_caller, .target_id = id_fn_target, .type = "CALLS"};
+    cbm_store_insert_edge(st, &call_edge);
+
+    cbm_edge_t tests_edge = {
+        .project = proj_name, .source_id = id_fn_test, .target_id = id_fn_target, .type = "TESTS"};
+    cbm_store_insert_edge(st, &tests_edge);
+
+    cbm_edge_t handles_edge = {
+        .project = proj_name, .source_id = id_fn_target, .target_id = id_route, .type = "HANDLES"};
+    cbm_store_insert_edge(st, &handles_edge);
+
+    cbm_edge_t tests_file_edge = {.project = proj_name,
+                                  .source_id = id_file_test,
+                                  .target_id = id_file_main,
+                                  .type = "TESTS_FILE"};
+    cbm_store_insert_edge(st, &tests_file_edge);
+
+    cbm_edge_t imports_edge = {.project = proj_name,
+                               .source_id = id_file_other,
+                               .target_id = id_file_main,
+                               .type = "IMPORTS"};
+    cbm_store_insert_edge(st, &imports_edge);
+
+    cbm_edge_t cochange_edge = {.project = proj_name,
+                                .source_id = id_file_main,
+                                .target_id = id_file_other,
+                                .type = "FILE_CHANGES_WITH"};
+    cbm_store_insert_edge(st, &cochange_edge);
+
+    return srv;
+}
+
+static void cleanup_file_context_dir(const char *tmp_dir) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/project/main.go", tmp_dir);
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/project/other.go", tmp_dir);
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/project/main_test.go", tmp_dir);
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/project", tmp_dir);
+    rmdir(path);
+    rmdir(tmp_dir);
+}
+
+TEST(tool_get_file_context_missing_path) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+
+    char *raw = cbm_mcp_handle_tool(srv, "get_file_context", "{}");
+    ASSERT_NOT_NULL(raw);
+    ASSERT_NOT_NULL(strstr(raw, "\"isError\":true"));
+
+    char *text = extract_text_content(raw);
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "path is required"));
+    free(text);
+    free(raw);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+TEST(tool_get_file_context_basic) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_file_context_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+
+    char *raw = cbm_mcp_handle_tool(
+        srv, "get_file_context",
+        "{\"path\":\"main.go\",\"project\":\"test-project\",\"max_related_files\":5,\"max_tests\":5}");
+    ASSERT_NOT_NULL(raw);
+    ASSERT_NULL(strstr(raw, "\"isError\":true"));
+
+    char *text = extract_text_content(raw);
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "\"tool_version\":\"1.0\""));
+    ASSERT_NOT_NULL(strstr(text, "\"path\":\"main.go\""));
+    ASSERT_NOT_NULL(strstr(text, "\"symbols\""));
+    ASSERT_NOT_NULL(strstr(text, "\"related_files\""));
+    ASSERT_NOT_NULL(strstr(text, "\"callers\""));
+    ASSERT_NOT_NULL(strstr(text, "\"tests\""));
+    ASSERT_NOT_NULL(strstr(text, "\"language\":\"go\""));
+    ASSERT_NOT_NULL(strstr(text, "\"pitfalls\""));
+    ASSERT_NOT_NULL(strstr(text, "\"test_command_hints\""));
+    ASSERT_NOT_NULL(strstr(text, "\"tier\":\"unit\""));
+    ASSERT_NOT_NULL(strstr(text, "other.go"));
+    ASSERT_NOT_NULL(strstr(text, "main_test.go"));
+    ASSERT_NOT_NULL(strstr(text, "HelperCaller"));
+    free(text);
+    free(raw);
+
+    cbm_mcp_server_free(srv);
+    cleanup_file_context_dir(tmp);
+    PASS();
+}
+
+TEST(tool_get_file_context_options) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_file_context_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+
+    char *raw = cbm_mcp_handle_tool(
+        srv, "get_file_context",
+        "{\"path\":\"main.go\",\"project\":\"test-project\",\"include_callers\":false,"
+        "\"include_snippets\":true}");
+    ASSERT_NOT_NULL(raw);
+    ASSERT_NULL(strstr(raw, "\"isError\":true"));
+
+    char *text = extract_text_content(raw);
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "\"include_callers\":false"));
+    ASSERT_NOT_NULL(strstr(text, "\"include_snippets\":true"));
+    ASSERT_NOT_NULL(strstr(text, "\"callers\":[]"));
+    ASSERT_NOT_NULL(strstr(text, "\"snippet_preview\""));
+    free(text);
+    free(raw);
+
+    cbm_mcp_server_free(srv);
+    cleanup_file_context_dir(tmp);
+    PASS();
+}
+
+TEST(tool_get_related_files_missing_path) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+
+    char *raw = cbm_mcp_handle_tool(srv, "get_related_files", "{}");
+    ASSERT_NOT_NULL(raw);
+    ASSERT_NOT_NULL(strstr(raw, "\"isError\":true"));
+
+    char *text = extract_text_content(raw);
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "path is required"));
+    free(text);
+    free(raw);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+TEST(tool_get_related_files_basic) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_file_context_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+
+    char *raw = cbm_mcp_handle_tool(
+        srv, "get_related_files",
+        "{\"path\":\"main.go\",\"project\":\"test-project\",\"limit\":5}");
+    ASSERT_NOT_NULL(raw);
+    ASSERT_NULL(strstr(raw, "\"isError\":true"));
+
+    char *text = extract_text_content(raw);
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "\"tool_version\":\"1.0\""));
+    ASSERT_NOT_NULL(strstr(text, "\"target\""));
+    ASSERT_NOT_NULL(strstr(text, "\"related_files\""));
+    ASSERT_NOT_NULL(strstr(text, "other.go"));
+    ASSERT_NOT_NULL(strstr(text, "main_test.go"));
+    ASSERT_NOT_NULL(strstr(text, "\"relationship_types\""));
+    free(text);
+    free(raw);
+
+    cbm_mcp_server_free(srv);
+    cleanup_file_context_dir(tmp);
+    PASS();
+}
+
+TEST(tool_get_tests_missing_paths) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+
+    char *raw = cbm_mcp_handle_tool(srv, "get_tests", "{}");
+    ASSERT_NOT_NULL(raw);
+    ASSERT_NOT_NULL(strstr(raw, "\"isError\":true"));
+
+    char *text = extract_text_content(raw);
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "paths or path is required"));
+    free(text);
+    free(raw);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+TEST(tool_get_tests_basic) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_file_context_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+
+    char *raw = cbm_mcp_handle_tool(
+        srv, "get_tests",
+        "{\"paths\":[\"main.go\"],\"project\":\"test-project\",\"limit\":5,\"include_reasons\":true}");
+    ASSERT_NOT_NULL(raw);
+    ASSERT_NULL(strstr(raw, "\"isError\":true"));
+
+    char *text = extract_text_content(raw);
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "\"tool_version\":\"1.0\""));
+    ASSERT_NOT_NULL(strstr(text, "\"targets\""));
+    ASSERT_NOT_NULL(strstr(text, "\"tests\""));
+    ASSERT_NOT_NULL(strstr(text, "main_test.go"));
+    ASSERT_NOT_NULL(strstr(text, "\"reason\""));
+    ASSERT_NOT_NULL(strstr(text, "\"tier\":\"unit\""));
+    ASSERT_NOT_NULL(strstr(text, "\"runner\":\"go\""));
+    ASSERT_NOT_NULL(strstr(text, "\"command\":\"go test ./...\""));
+    free(text);
+    free(raw);
+
+    cbm_mcp_server_free(srv);
+    cleanup_file_context_dir(tmp);
+    PASS();
+}
+
+TEST(tool_get_callers_missing_target) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+
+    char *raw = cbm_mcp_handle_tool(srv, "get_callers", "{}");
+    ASSERT_NOT_NULL(raw);
+    ASSERT_NOT_NULL(strstr(raw, "\"isError\":true"));
+
+    char *text = extract_text_content(raw);
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "symbol or path is required"));
+    free(text);
+    free(raw);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+TEST(tool_get_callers_symbol_basic) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_file_context_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+
+    char *raw = cbm_mcp_handle_tool(
+        srv, "get_callers",
+        "{\"symbol\":\"HandleRequest\",\"project\":\"test-project\",\"depth\":2,"
+        "\"include_file_aggregation\":true}");
+    ASSERT_NOT_NULL(raw);
+    ASSERT_NULL(strstr(raw, "\"isError\":true"));
+
+    char *text = extract_text_content(raw);
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "\"tool_version\":\"1.0\""));
+    ASSERT_NOT_NULL(strstr(text, "\"matches\""));
+    ASSERT_NOT_NULL(strstr(text, "\"callers\""));
+    ASSERT_NOT_NULL(strstr(text, "\"by_file\""));
+    ASSERT_NOT_NULL(strstr(text, "\"resolved_qualified_name\":\"test-project.main.HandleRequest\""));
+    ASSERT_NOT_NULL(strstr(text, "HelperCaller"));
+    ASSERT_NOT_NULL(strstr(text, "\"path\":\"other.go\""));
+    ASSERT_NOT_NULL(strstr(text, "\"depth\":1"));
+    free(text);
+    free(raw);
+
+    cbm_mcp_server_free(srv);
+    cleanup_file_context_dir(tmp);
+    PASS();
+}
+
+TEST(tool_get_change_risks_missing_target) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+
+    char *raw = cbm_mcp_handle_tool(srv, "get_change_risks", "{}");
+    ASSERT_NOT_NULL(raw);
+    ASSERT_NOT_NULL(strstr(raw, "\"isError\":true"));
+
+    char *text = extract_text_content(raw);
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "paths or diff_mode is required"));
+    free(text);
+    free(raw);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+TEST(tool_get_change_risks_basic) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_file_context_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+
+    char *raw = cbm_mcp_handle_tool(
+        srv, "get_change_risks",
+        "{\"paths\":[\"main.go\",\"other.go\"],\"project\":\"test-project\",\"include_tests\":true,"
+        "\"include_routes\":true}");
+    ASSERT_NOT_NULL(raw);
+    ASSERT_NULL(strstr(raw, "\"isError\":true"));
+
+    char *text = extract_text_content(raw);
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "\"tool_version\":\"1.0\""));
+    ASSERT_NOT_NULL(strstr(text, "\"affected_symbols\""));
+    ASSERT_NOT_NULL(strstr(text, "\"affected_routes\""));
+    ASSERT_NOT_NULL(strstr(text, "\"related_tests\""));
+    ASSERT_NOT_NULL(strstr(text, "\"test_command_hints\""));
+    ASSERT_NOT_NULL(strstr(text, "\"risk_factors\""));
+    ASSERT_NOT_NULL(strstr(text, "\"pitfalls\""));
+    ASSERT_NOT_NULL(strstr(text, "\"blast_radius_score\""));
+    ASSERT_NOT_NULL(strstr(text, "\"indexed_targets\""));
+    ASSERT_NOT_NULL(strstr(text, "\"missing_targets\":[]"));
+    ASSERT_NOT_NULL(strstr(text, "main_test.go"));
+    ASSERT_NOT_NULL(strstr(text, "multi_file_change"));
+    ASSERT_NOT_NULL(strstr(text, "route_and_service_changed"));
+    ASSERT_NOT_NULL(strstr(text, "HandleRequest"));
+    ASSERT_NOT_NULL(strstr(text, "HelperCaller"));
+    ASSERT_NOT_NULL(strstr(text, "\"relationship_types\""));
+    ASSERT_NOT_NULL(strstr(text, "\"priority_score\""));
+    ASSERT_NOT_NULL(strstr(text, "\"primary_relationship\""));
+    ASSERT_NOT_NULL(strstr(text, "\"primary_relationship\":\"TESTS\""));
+    ASSERT_NOT_NULL(strstr(text, "\"tier\":\"unit\""));
+    ASSERT_NOT_NULL(strstr(text, "\"runner\":\"go\""));
+    free(text);
+    free(raw);
+
+    cbm_mcp_server_free(srv);
+    cleanup_file_context_dir(tmp);
+    PASS();
+}
+
+TEST(tool_get_change_risks_compact_options) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_file_context_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+
+    char *raw = cbm_mcp_handle_tool(
+        srv, "get_change_risks",
+        "{\"paths\":[\"main.go\",\"other.go\"],\"project\":\"test-project\",\"include_tests\":true,"
+        "\"include_routes\":true,\"max_related_files\":1,\"max_tests\":1}");
+    ASSERT_NOT_NULL(raw);
+    ASSERT_NULL(strstr(raw, "\"isError\":true"));
+
+    char *text = extract_text_content(raw);
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "\"max_related_files\":1"));
+    ASSERT_NOT_NULL(strstr(text, "\"max_tests\":1"));
+    ASSERT_NOT_NULL(strstr(text, "\"test_command_hints\""));
+    ASSERT_NOT_NULL(strstr(text, "\"relationship_types\""));
+    ASSERT_NOT_NULL(strstr(text, "\"priority_score\""));
+    free(text);
+    free(raw);
+
+    cbm_mcp_server_free(srv);
+    cleanup_file_context_dir(tmp);
+    PASS();
+}
+
+TEST(tool_get_change_risks_partial_coverage) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_file_context_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+
+    char *raw = cbm_mcp_handle_tool(
+        srv, "get_change_risks",
+        "{\"paths\":[\"main.go\",\"missing.go\"],\"project\":\"test-project\",\"include_tests\":true,"
+        "\"include_routes\":true}");
+    ASSERT_NOT_NULL(raw);
+    ASSERT_NULL(strstr(raw, "\"isError\":true"));
+
+    char *text = extract_text_content(raw);
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "\"confidence\":\"medium\""));
+    ASSERT_NOT_NULL(strstr(text, "\"indexed_targets\":[\"main.go\"]"));
+    ASSERT_NOT_NULL(strstr(text, "\"missing_targets\":[\"missing.go\"]"));
+    ASSERT_NOT_NULL(strstr(text, "partial_graph_coverage"));
+    ASSERT_NOT_NULL(strstr(text, "Graph coverage is partial"));
+    ASSERT_NOT_NULL(strstr(text, "Search code for missing targets"));
+    free(text);
+    free(raw);
+
+    cbm_mcp_server_free(srv);
+    cleanup_file_context_dir(tmp);
+    PASS();
+}
+
+TEST(tool_get_edit_plan_missing_path) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+
+    char *raw = cbm_mcp_handle_tool(srv, "get_edit_plan", "{}");
+    ASSERT_NOT_NULL(raw);
+    ASSERT_NOT_NULL(strstr(raw, "\"isError\":true"));
+
+    char *text = extract_text_content(raw);
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "path is required"));
+    free(text);
+    free(raw);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+TEST(tool_get_edit_plan_basic) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_file_context_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+
+    char *raw = cbm_mcp_handle_tool(
+        srv, "get_edit_plan",
+        "{\"path\":\"main.go\",\"project\":\"test-project\",\"include_routes\":true,"
+        "\"max_related_files\":4,\"max_tests\":3}");
+    ASSERT_NOT_NULL(raw);
+    ASSERT_NULL(strstr(raw, "\"isError\":true"));
+
+    char *text = extract_text_content(raw);
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "\"tool_version\":\"1.0\""));
+    ASSERT_NOT_NULL(strstr(text, "\"file_context\""));
+    ASSERT_NOT_NULL(strstr(text, "\"change_risks\""));
+    ASSERT_NOT_NULL(strstr(text, "\"immediate_steps\""));
+    ASSERT_NOT_NULL(strstr(text, "\"path\":\"main.go\""));
+    ASSERT_NOT_NULL(strstr(text, "Pre-edit plan for main.go."));
+    ASSERT_NOT_NULL(strstr(text, "\"risk_level\""));
+    ASSERT_NOT_NULL(strstr(text, "\"test_command_hints\""));
+    ASSERT_NOT_NULL(strstr(text, "main_test.go"));
+    ASSERT_NOT_NULL(strstr(text, "HandleRequest"));
+    free(text);
+    free(raw);
+
+    cbm_mcp_server_free(srv);
+    cleanup_file_context_dir(tmp);
+    PASS();
+}
+
+TEST(tool_get_edit_plan_compact_mode) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_file_context_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+
+    char *raw = cbm_mcp_handle_tool(
+        srv, "get_edit_plan",
+        "{\"path\":\"main.go\",\"project\":\"test-project\",\"mode\":\"compact\","
+        "\"max_related_files\":3,\"max_tests\":2}");
+    ASSERT_NOT_NULL(raw);
+    ASSERT_NULL(strstr(raw, "\"isError\":true"));
+
+    char *text = extract_text_content(raw);
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "\"mode\":\"compact\""));
+    ASSERT_NOT_NULL(strstr(text, "\"top_related_files\""));
+    ASSERT_NOT_NULL(strstr(text, "\"top_tests\""));
+    ASSERT_NOT_NULL(strstr(text, "\"test_command_hints\""));
+
+    yyjson_doc *doc = yyjson_read(text, strlen(text), 0);
+    ASSERT_NOT_NULL(doc);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *data = yyjson_obj_get(root, "data");
+    ASSERT_NOT_NULL(data);
+    yyjson_val *file_context = yyjson_obj_get(data, "file_context");
+    yyjson_val *change_risks = yyjson_obj_get(data, "change_risks");
+    ASSERT_NOT_NULL(file_context);
+    ASSERT_NOT_NULL(change_risks);
+    ASSERT_NULL(yyjson_obj_get(file_context, "data"));
+    ASSERT_NULL(yyjson_obj_get(change_risks, "data"));
+    yyjson_doc_free(doc);
+
+    free(text);
+    free(raw);
+
+    cbm_mcp_server_free(srv);
+    cleanup_file_context_dir(tmp);
+    PASS();
+}
+
+TEST(tool_get_edit_plan_task_type_refactor) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_file_context_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+
+    char *raw = cbm_mcp_handle_tool(
+        srv, "get_edit_plan",
+        "{\"path\":\"main.go\",\"project\":\"test-project\",\"task_type\":\"refactor\"}");
+    ASSERT_NOT_NULL(raw);
+    ASSERT_NULL(strstr(raw, "\"isError\":true"));
+
+    char *text = extract_text_content(raw);
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "\"task_type\":\"refactor\""));
+    ASSERT_NOT_NULL(strstr(text, "Preserve caller-visible contracts while restructuring internals."));
+    ASSERT_NOT_NULL(strstr(text, "Run the highest-value tests plus broader regression coverage."));
+    free(text);
+    free(raw);
+
+    cbm_mcp_server_free(srv);
+    cleanup_file_context_dir(tmp);
+    PASS();
+}
+
+TEST(tool_get_edit_plan_task_type_investigate) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_file_context_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+
+    char *raw = cbm_mcp_handle_tool(
+        srv, "get_edit_plan",
+        "{\"path\":\"main.go\",\"project\":\"test-project\",\"task_type\":\"investigate\","
+        "\"mode\":\"compact\"}");
+    ASSERT_NOT_NULL(raw);
+    ASSERT_NULL(strstr(raw, "\"isError\":true"));
+
+    char *text = extract_text_content(raw);
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "\"task_type\":\"investigate\""));
+    ASSERT_NOT_NULL(strstr(text, "avoid editing until the root cause is clear"));
+    ASSERT_NOT_NULL(strstr(text, "confirming the blast radius before making code modifications"));
+    free(text);
+    free(raw);
+
+    cbm_mcp_server_free(srv);
+    cleanup_file_context_dir(tmp);
+    PASS();
+}
+
 /* ── TestSnippet_ExactQN ──────────────────────────────────────── */
 
 TEST(snippet_exact_qn) {
@@ -1267,6 +1891,24 @@ SUITE(mcp) {
 
     /* Pipeline-dependent tool handlers */
     RUN_TEST(tool_index_repository_missing_path);
+    RUN_TEST(tool_get_file_context_missing_path);
+    RUN_TEST(tool_get_file_context_basic);
+    RUN_TEST(tool_get_file_context_options);
+    RUN_TEST(tool_get_related_files_missing_path);
+    RUN_TEST(tool_get_related_files_basic);
+    RUN_TEST(tool_get_tests_missing_paths);
+    RUN_TEST(tool_get_tests_basic);
+    RUN_TEST(tool_get_callers_missing_target);
+    RUN_TEST(tool_get_callers_symbol_basic);
+    RUN_TEST(tool_get_change_risks_missing_target);
+    RUN_TEST(tool_get_change_risks_basic);
+    RUN_TEST(tool_get_change_risks_compact_options);
+    RUN_TEST(tool_get_change_risks_partial_coverage);
+    RUN_TEST(tool_get_edit_plan_missing_path);
+    RUN_TEST(tool_get_edit_plan_basic);
+    RUN_TEST(tool_get_edit_plan_compact_mode);
+    RUN_TEST(tool_get_edit_plan_task_type_refactor);
+    RUN_TEST(tool_get_edit_plan_task_type_investigate);
     RUN_TEST(tool_get_code_snippet_missing_qn);
     RUN_TEST(tool_get_code_snippet_not_found);
     RUN_TEST(tool_search_code_missing_pattern);
