@@ -155,6 +155,9 @@ search_code(pattern="(?i)(POST|PUT).*\\/api\\/v[0-9]\\/orders", regex=true)
 | I need the full composed plan for file X | `get_edit_plan(mode="detailed", task_type="fix")` |
 | I am refactoring file X | `get_edit_plan(mode="compact", task_type="refactor")` |
 | I am investigating file X before editing | `get_edit_plan(mode="compact", task_type="investigate")` |
+| I want a reusable fix checklist in the client | open `playbooks/fix.md` |
+| I want a reusable refactor checklist in the client | open `playbooks/refactor.md` |
+| I want a reusable investigation checklist in the client | open `playbooks/investigate.md` |
 | I need more granular raw context for file X | `get_file_context` |
 | Who calls X? | `trace_call_path(direction="inbound")` |
 | What does X call? | `trace_call_path(direction="outbound")` |

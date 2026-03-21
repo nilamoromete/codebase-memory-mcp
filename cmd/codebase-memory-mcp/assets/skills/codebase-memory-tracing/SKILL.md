@@ -140,6 +140,7 @@ Returns changed files, changed symbols, and impacted callers with risk classific
 
 ## Key Tips
 
+- For diagnosis-first work, pair this skill with the installed `playbooks/investigate.md`.
 - Prefer `get_change_risks` when you already know the files; use `detect_changes` when you need git-derived file discovery.
 - Start with `depth=1` for quick answers, increase only if needed (max 5).
 - Edge types in trace results: `CALLS` (direct), `HTTP_CALLS` (cross-service), `ASYNC_CALLS` (async dispatch), `USAGE` (read reference), `OVERRIDE` (interface implementation).

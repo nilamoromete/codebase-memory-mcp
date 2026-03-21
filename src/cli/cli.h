@@ -48,7 +48,7 @@ int cbm_copy_file(const char *src, const char *dst);
 /* ── Skill file management ────────────────────────────────────── */
 
 /* Number of skill files. */
-#define CBM_SKILL_COUNT 4
+#define CBM_SKILL_COUNT 7
 
 /* Skill name/content pair. */
 typedef struct {
@@ -71,6 +71,16 @@ int cbm_remove_skills(const char *skills_dir, bool dry_run);
 /* Remove old monolithic skill dir if it exists.
  * Returns true if it was removed. */
 bool cbm_remove_old_monolithic_skill(const char *skills_dir, bool dry_run);
+
+/* ── Client playbooks ─────────────────────────────────────────── */
+
+/* Install task-type playbooks to the given playbooks_dir.
+ * Returns count of playbooks written. */
+int cbm_install_playbooks(const char *playbooks_dir, bool force, bool dry_run);
+
+/* Remove task-type playbooks from playbooks_dir.
+ * Returns count of playbooks removed. */
+int cbm_remove_playbooks(const char *playbooks_dir, bool dry_run);
 
 /* ── Editor MCP config management ─────────────────────────────── */
 

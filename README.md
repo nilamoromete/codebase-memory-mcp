@@ -37,6 +37,12 @@ High-quality parsing through [tree-sitter](https://tree-sitter.github.io/tree-si
 
 The `install` command auto-detects all installed coding agents and configures MCP server entries, instruction files, skills, and pre-tool hooks for each.
 
+It also installs task-type playbooks for supported clients:
+
+- `fix.md` for narrow bug-fix workflows
+- `refactor.md` for contract-preserving cleanup
+- `investigate.md` for diagnosis-first analysis
+
 ### Recommended Agent Workflow
 
 For day-to-day coding, start with the high-level tools:
@@ -48,6 +54,12 @@ For day-to-day coding, start with the high-level tools:
 5. `get_file_context(path="...")` only when you need the raw composed detail
 
 This keeps token use low while still surfacing callers, tests, related files, risk factors, and safe next steps.
+
+If you want repeatable client-side guidance, open the installed playbooks under:
+
+- `~/.claude/playbooks/`
+- `~/.codex/playbooks/`
+- `~/.gemini/playbooks/`
 
 ### Graph Visualization UI
 
@@ -89,6 +101,7 @@ Removes all agent configs, skills, hooks, and instructions. Does not remove the 
 
 - **Architecture overview**: `get_architecture` returns languages, packages, entry points, routes, hotspots, boundaries, layers, and clusters in a single call
 - **Pre-edit planning**: `get_edit_plan` composes file context and change-risk guidance into a single MCP call, with `mode="compact"` and `task_type` support for `fix`, `refactor`, and `investigate`
+- **Task-type playbooks**: installable client-side guides for `fix`, `refactor`, and `investigate` workflows
 - **Architecture Decision Records**: `manage_adr` persists architectural decisions across sessions
 - **Louvain community detection**: Discovers functional modules by clustering call edges
 - **Git diff impact mapping**: `detect_changes` maps uncommitted changes to affected symbols with risk classification
@@ -226,7 +239,7 @@ Restart your agent. Verify with `/mcp` — you should see `codebase-memory-mcp` 
 
 | Agent | MCP Config | Instructions | Hooks |
 |-------|-----------|-------------|-------|
-| Claude Code | `.claude/.mcp.json` | 4 Skills | PreToolUse (Grep/Glob/Read reminder) |
+| Claude Code | `.claude/.mcp.json` | 7 Skills + playbooks | PreToolUse (Grep/Glob/Read reminder) |
 | Codex CLI | `.codex/config.toml` | `.codex/AGENTS.md` | — |
 | Gemini CLI | `.gemini/settings.json` | `.gemini/GEMINI.md` | BeforeTool (grep/read reminder) |
 | Zed | `settings.json` (JSONC) | — | — |

@@ -14,6 +14,7 @@ dozens of file-by-file searches.
 - To identify likely tests → use `get_tests`
 - To understand inbound callers → use `get_callers`
 - After a multi-file change → use `get_change_risks`
+- For reusable workflows → open `.codex/playbooks/fix.md`, `.codex/playbooks/refactor.md`, or `.codex/playbooks/investigate.md`
 
 ## Tracing Dependencies
 

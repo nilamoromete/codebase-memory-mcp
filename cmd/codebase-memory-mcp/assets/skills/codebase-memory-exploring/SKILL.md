@@ -110,6 +110,8 @@ get_code_snippet(qualified_name="project.path.to.FunctionName")
 
 ## Key Tips
 
+- Use the installed playbooks for repeatable task-type flows:
+  `~/.claude/playbooks/fix.md`, `refactor.md`, `investigate.md`.
 - Use `get_tests(paths=[...])` before declaring an edit safe.
 - Use `get_change_risks(paths=[...])` after multi-file edits.
 - Results default to 10 per page. Check `has_more` and use `offset` to paginate.

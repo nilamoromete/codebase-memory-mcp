@@ -337,6 +337,87 @@ static const char skill_quality_content[] =
     "- `search_graph(min_degree=10)` — high fan-out functions\n"
     "- `search_graph(label=\"Function\", sort_by=\"degree\")` — most-connected functions\n";
 
+static const char skill_fix_content[] =
+    "---\n"
+    "name: codebase-memory-fix\n"
+    "description: Bug-fix playbook for narrow patches with fast regression checks. ALWAYS invoke "
+    "this skill when the user asks to fix a bug, stop a regression, or patch a specific failure "
+    "without broad structural changes. Do not start with a broad refactor.\n"
+    "---\n"
+    "\n"
+    "# Fix Playbook\n"
+    "\n"
+    "## Default call\n"
+    "```\n"
+    "get_edit_plan(path=\"src/path/to/file.ext\", mode=\"compact\", task_type=\"fix\")\n"
+    "```\n"
+    "\n"
+    "## Flow\n"
+    "1. Start with `get_edit_plan(..., task_type=\"fix\")`\n"
+    "2. Inspect inbound callers with `get_callers` if the change can alter behavior\n"
+    "3. Run `get_tests` for the touched file set before claiming safety\n"
+    "4. After multi-file edits, run `get_change_risks(paths=[...])`\n"
+    "\n"
+    "## Keep the patch narrow\n"
+    "- Prefer the smallest change that removes the failure.\n"
+    "- Preserve caller-visible contracts unless the bug is the contract.\n"
+    "- Escalate to `mode=\"detailed\"` only when compact output leaves ambiguity.\n";
+
+static const char skill_refactor_playbook_content[] =
+    "---\n"
+    "name: codebase-memory-refactor\n"
+    "description: Refactor playbook for structural cleanup while preserving behavior. ALWAYS "
+    "invoke this skill when the user asks to reorganize code, simplify internals, split files, "
+    "or reduce complexity. Do not change external contracts unless the task explicitly requires "
+    "it.\n"
+    "---\n"
+    "\n"
+    "# Refactor Playbook\n"
+    "\n"
+    "## Default call\n"
+    "```\n"
+    "get_edit_plan(path=\"src/path/to/file.ext\", mode=\"compact\", task_type=\"refactor\")\n"
+    "```\n"
+    "\n"
+    "## Flow\n"
+    "1. Start with `get_edit_plan(..., task_type=\"refactor\")`\n"
+    "2. Inspect `get_related_files` before moving logic across file boundaries\n"
+    "3. Use `get_callers` to preserve call contracts and behavior at boundaries\n"
+    "4. Run `get_tests` for touched files plus adjacent integration coverage\n"
+    "5. Run `get_change_risks(paths=[...])` before finalizing larger edits\n"
+    "\n"
+    "## Guardrails\n"
+    "- Keep externally visible interfaces stable unless the task explicitly changes them.\n"
+    "- Favor incremental file moves over broad rewrites.\n"
+    "- Use `mode=\"detailed\"` when the compact plan hides relevant structure.\n";
+
+static const char skill_investigate_content[] =
+    "---\n"
+    "name: codebase-memory-investigate\n"
+    "description: Investigation playbook for diagnosis-first work. ALWAYS invoke this skill when "
+    "the user asks why something fails, where behavior comes from, or what code path triggers a "
+    "symptom. Do not start patching before the probable root cause is clear.\n"
+    "---\n"
+    "\n"
+    "# Investigate Playbook\n"
+    "\n"
+    "## Default call\n"
+    "```\n"
+    "get_edit_plan(path=\"src/path/to/file.ext\", mode=\"compact\", task_type=\"investigate\")\n"
+    "```\n"
+    "\n"
+    "## Flow\n"
+    "1. Start with `get_edit_plan(..., task_type=\"investigate\")`\n"
+    "2. Use `get_callers` and `trace_call_path(..., direction=\"both\")` to confirm the path\n"
+    "3. Use `get_file_context` if you need raw symbols, tests, and nearby files together\n"
+    "4. Use `search_graph` / `get_code_snippet` only after you know the likely path\n"
+    "5. Edit code only after the probable root cause and blast radius are clear\n"
+    "\n"
+    "## Guardrails\n"
+    "- Do not start with a broad patch when the cause is still unclear.\n"
+    "- Prefer evidence gathering and narrowing first.\n"
+    "- If the issue spans multiple files, finish with `get_change_risks(paths=[...])` before patching.\n";
+
 static const char skill_reference_content[] =
     "---\n"
     "name: codebase-memory-reference\n"
@@ -395,6 +476,11 @@ static const char codex_instructions_content[] =
     "- `get_change_risks` — summarize regression risk after multi-file edits\n"
     "- `search_graph` / `trace_call_path` / `get_code_snippet` — use for deeper graph-native inspection\n"
     "\n"
+    "Task-type playbooks are installed under `.codex/playbooks/`:\n"
+    "- `fix.md` — narrow patches and regression checks\n"
+    "- `refactor.md` — contract-preserving cleanup\n"
+    "- `investigate.md` — diagnosis-first workflows\n"
+    "\n"
     "Always prefer the high-level MCP tools first, then fall back to graph primitives or grep.\n";
 
 static const char gemini_instructions_content[] =
@@ -412,6 +498,8 @@ static const char gemini_instructions_content[] =
     "\n"
     "Use `task_type=\"refactor\"` for structural cleanup and `task_type=\"investigate\"` for diagnosis-first work.\n"
     "\n"
+    "Task-type playbooks are installed under `.gemini/playbooks/`.\n"
+    "\n"
     "Then use `search_graph`, `trace_call_path`, `get_code_snippet`, or `query_graph` when deeper "
     "structural detail is required.\n";
 
@@ -419,8 +507,67 @@ static const cbm_skill_t skills[CBM_SKILL_COUNT] = {
     {"codebase-memory-exploring", skill_exploring_content},
     {"codebase-memory-tracing", skill_tracing_content},
     {"codebase-memory-quality", skill_quality_content},
+    {"codebase-memory-fix", skill_fix_content},
+    {"codebase-memory-refactor", skill_refactor_playbook_content},
+    {"codebase-memory-investigate", skill_investigate_content},
     {"codebase-memory-reference", skill_reference_content},
 };
+
+typedef struct {
+    const char *name;
+    const char *filename;
+    const char *content;
+} cbm_playbook_t;
+
+static const char playbook_fix_content[] =
+    "# Fix Playbook\n"
+    "\n"
+    "Start with:\n"
+    "```\n"
+    "get_edit_plan(path=\"src/path/to/file.ext\", mode=\"compact\", task_type=\"fix\")\n"
+    "```\n"
+    "\n"
+    "Then:\n"
+    "1. Inspect the smallest safe patch.\n"
+    "2. Use `get_callers` before changing behavior.\n"
+    "3. Use `get_tests(paths=[...])` for the edited files.\n"
+    "4. Use `get_change_risks(paths=[...])` after multi-file edits.\n";
+
+static const char playbook_refactor_content[] =
+    "# Refactor Playbook\n"
+    "\n"
+    "Start with:\n"
+    "```\n"
+    "get_edit_plan(path=\"src/path/to/file.ext\", mode=\"compact\", task_type=\"refactor\")\n"
+    "```\n"
+    "\n"
+    "Then:\n"
+    "1. Review `get_related_files` before moving logic.\n"
+    "2. Use `get_callers` to preserve contracts.\n"
+    "3. Use `get_tests(paths=[...])` plus wider regression coverage.\n"
+    "4. Use `get_change_risks(paths=[...])` before finalizing larger edits.\n";
+
+static const char playbook_investigate_content[] =
+    "# Investigate Playbook\n"
+    "\n"
+    "Start with:\n"
+    "```\n"
+    "get_edit_plan(path=\"src/path/to/file.ext\", mode=\"compact\", task_type=\"investigate\")\n"
+    "```\n"
+    "\n"
+    "Then:\n"
+    "1. Confirm callers with `get_callers` or `trace_call_path(..., direction=\"both\")`.\n"
+    "2. Use `get_file_context` if you need the raw file-level picture.\n"
+    "3. Delay edits until the likely root cause and blast radius are clear.\n"
+    "4. If you patch after diagnosis, finish with `get_change_risks(paths=[...])`.\n";
+
+static const cbm_playbook_t playbooks[] = {
+    {"fix", "fix.md", playbook_fix_content},
+    {"refactor", "refactor.md", playbook_refactor_content},
+    {"investigate", "investigate.md", playbook_investigate_content},
+};
+
+#define CBM_PLAYBOOK_COUNT ((int)(sizeof(playbooks) / sizeof(playbooks[0])))
 
 const cbm_skill_t *cbm_get_skills(void) {
     return skills;
@@ -526,6 +673,65 @@ int cbm_remove_skills(const char *skills_dir, bool dry_run) {
         }
 
         if (rmdir_recursive(skill_path) == 0) {
+            count++;
+        }
+    }
+    return count;
+}
+
+int cbm_install_playbooks(const char *playbooks_dir, bool force, bool dry_run) {
+    if (!playbooks_dir) {
+        return 0;
+    }
+    int count = 0;
+    for (int i = 0; i < CBM_PLAYBOOK_COUNT; i++) {
+        char file_path[1024];
+        snprintf(file_path, sizeof(file_path), "%s/%s", playbooks_dir, playbooks[i].filename);
+
+        if (!force) {
+            struct stat st;
+            if (stat(file_path, &st) == 0) {
+                continue;
+            }
+        }
+
+        if (dry_run) {
+            count++;
+            continue;
+        }
+
+        if (mkdirp(playbooks_dir, DIR_PERMS) != 0) {
+            continue;
+        }
+
+        FILE *f = fopen(file_path, "w");
+        if (!f) {
+            continue;
+        }
+        (void)fwrite(playbooks[i].content, 1, strlen(playbooks[i].content), f);
+        (void)fclose(f);
+        count++;
+    }
+    return count;
+}
+
+int cbm_remove_playbooks(const char *playbooks_dir, bool dry_run) {
+    if (!playbooks_dir) {
+        return 0;
+    }
+    int count = 0;
+    for (int i = 0; i < CBM_PLAYBOOK_COUNT; i++) {
+        char file_path[1024];
+        snprintf(file_path, sizeof(file_path), "%s/%s", playbooks_dir, playbooks[i].filename);
+        struct stat st;
+        if (stat(file_path, &st) != 0) {
+            continue;
+        }
+        if (dry_run) {
+            count++;
+            continue;
+        }
+        if (cbm_unlink(file_path) == 0) {
             count++;
         }
     }
@@ -2236,11 +2442,15 @@ int cbm_cmd_install(int argc, char **argv) {
     /* Step 4: Install Claude Code skills + hooks */
     if (agents.claude_code) {
         char skills_dir[1024];
+        char playbooks_dir[1024];
         snprintf(skills_dir, sizeof(skills_dir), "%s/.claude/skills", home);
+        snprintf(playbooks_dir, sizeof(playbooks_dir), "%s/.claude/playbooks", home);
         printf("Claude Code:\n");
 
         int skill_count = cbm_install_skills(skills_dir, force, dry_run);
         printf("  skills: %d installed\n", skill_count);
+        int playbook_count = cbm_install_playbooks(playbooks_dir, force, dry_run);
+        printf("  playbooks: %d installed\n", playbook_count);
 
         if (cbm_remove_old_monolithic_skill(skills_dir, dry_run)) {
             printf("  removed old monolithic skill\n");
@@ -2276,9 +2486,12 @@ int cbm_cmd_install(int argc, char **argv) {
     if (agents.codex) {
         printf("Codex CLI:\n");
         char config_path[1024];
+        char playbooks_dir[1024];
         snprintf(config_path, sizeof(config_path), "%s/.codex/config.toml", home);
+        snprintf(playbooks_dir, sizeof(playbooks_dir), "%s/.codex/playbooks", home);
         if (!dry_run) {
             cbm_upsert_codex_mcp(self_path, config_path);
+            cbm_install_playbooks(playbooks_dir, force, false);
         }
         printf("  mcp: %s\n", config_path);
 
@@ -2288,15 +2501,19 @@ int cbm_cmd_install(int argc, char **argv) {
             cbm_upsert_instructions(instr_path, codex_instructions_content);
         }
         printf("  instructions: %s\n", instr_path);
+        printf("  playbooks: %s\n", playbooks_dir);
     }
 
     /* Step 6: Install Gemini CLI */
     if (agents.gemini) {
         printf("Gemini CLI:\n");
         char config_path[1024];
+        char playbooks_dir[1024];
         snprintf(config_path, sizeof(config_path), "%s/.gemini/settings.json", home);
+        snprintf(playbooks_dir, sizeof(playbooks_dir), "%s/.gemini/playbooks", home);
         if (!dry_run) {
             cbm_install_editor_mcp(self_path, config_path);
+            cbm_install_playbooks(playbooks_dir, force, false);
         }
         printf("  mcp: %s\n", config_path);
 
@@ -2306,6 +2523,7 @@ int cbm_cmd_install(int argc, char **argv) {
             cbm_upsert_instructions(instr_path, gemini_instructions_content);
         }
         printf("  instructions: %s\n", instr_path);
+        printf("  playbooks: %s\n", playbooks_dir);
 
         /* BeforeTool hook (shared with Antigravity) */
         if (!dry_run) {
@@ -2352,9 +2570,12 @@ int cbm_cmd_install(int argc, char **argv) {
     if (agents.antigravity) {
         printf("Antigravity:\n");
         char config_path[1024];
+        char playbooks_dir[1024];
         snprintf(config_path, sizeof(config_path), "%s/.gemini/antigravity/mcp_config.json", home);
+        snprintf(playbooks_dir, sizeof(playbooks_dir), "%s/.gemini/antigravity/playbooks", home);
         if (!dry_run) {
             cbm_upsert_antigravity_mcp(self_path, config_path);
+            cbm_install_playbooks(playbooks_dir, force, false);
         }
         printf("  mcp: %s\n", config_path);
 
@@ -2364,6 +2585,7 @@ int cbm_cmd_install(int argc, char **argv) {
             cbm_upsert_instructions(instr_path, gemini_instructions_content);
         }
         printf("  instructions: %s\n", instr_path);
+        printf("  playbooks: %s\n", playbooks_dir);
     }
 
     /* Step 10: Install Aider */
@@ -2470,9 +2692,13 @@ int cbm_cmd_uninstall(int argc, char **argv) {
 
     if (agents.claude_code) {
         char skills_dir[1024];
+        char playbooks_dir[1024];
         snprintf(skills_dir, sizeof(skills_dir), "%s/.claude/skills", home);
+        snprintf(playbooks_dir, sizeof(playbooks_dir), "%s/.claude/playbooks", home);
         int removed = cbm_remove_skills(skills_dir, dry_run);
         printf("Claude Code: removed %d skill(s)\n", removed);
+        int playbooks_removed = cbm_remove_playbooks(playbooks_dir, dry_run);
+        printf("  removed %d playbook(s)\n", playbooks_removed);
 
         char mcp_path[1024];
         snprintf(mcp_path, sizeof(mcp_path), "%s/.claude/.mcp.json", home);
@@ -2498,9 +2724,12 @@ int cbm_cmd_uninstall(int argc, char **argv) {
 
     if (agents.codex) {
         char config_path[1024];
+        char playbooks_dir[1024];
         snprintf(config_path, sizeof(config_path), "%s/.codex/config.toml", home);
+        snprintf(playbooks_dir, sizeof(playbooks_dir), "%s/.codex/playbooks", home);
         if (!dry_run) {
             cbm_remove_codex_mcp(config_path);
+            cbm_remove_playbooks(playbooks_dir, false);
         }
         printf("Codex CLI: removed MCP config entry\n");
 
@@ -2510,13 +2739,17 @@ int cbm_cmd_uninstall(int argc, char **argv) {
             cbm_remove_instructions(instr_path);
         }
         printf("  removed instructions\n");
+        printf("  removed playbooks\n");
     }
 
     if (agents.gemini) {
         char config_path[1024];
+        char playbooks_dir[1024];
         snprintf(config_path, sizeof(config_path), "%s/.gemini/settings.json", home);
+        snprintf(playbooks_dir, sizeof(playbooks_dir), "%s/.gemini/playbooks", home);
         if (!dry_run) {
             cbm_remove_editor_mcp(config_path);
+            cbm_remove_playbooks(playbooks_dir, false);
         }
         printf("Gemini CLI: removed MCP config entry\n");
 
@@ -2531,6 +2764,7 @@ int cbm_cmd_uninstall(int argc, char **argv) {
             cbm_remove_instructions(instr_path);
         }
         printf("  removed instructions\n");
+        printf("  removed playbooks\n");
     }
 
     if (agents.zed) {
@@ -2565,9 +2799,12 @@ int cbm_cmd_uninstall(int argc, char **argv) {
 
     if (agents.antigravity) {
         char config_path[1024];
+        char playbooks_dir[1024];
         snprintf(config_path, sizeof(config_path), "%s/.gemini/antigravity/mcp_config.json", home);
+        snprintf(playbooks_dir, sizeof(playbooks_dir), "%s/.gemini/antigravity/playbooks", home);
         if (!dry_run) {
             cbm_remove_antigravity_mcp(config_path);
+            cbm_remove_playbooks(playbooks_dir, false);
         }
         printf("Antigravity: removed MCP config entry\n");
 
@@ -2577,6 +2814,7 @@ int cbm_cmd_uninstall(int argc, char **argv) {
             cbm_remove_instructions(instr_path);
         }
         printf("  removed instructions\n");
+        printf("  removed playbooks\n");
     }
 
     if (agents.aider) {

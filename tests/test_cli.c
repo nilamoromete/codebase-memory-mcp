@@ -532,11 +532,13 @@ TEST(cli_remove_old_monolithic_skill) {
 TEST(cli_skill_files_content) {
     /* Port of TestSkillFilesContent */
     const cbm_skill_t *sk = cbm_get_skills();
-    ASSERT_EQ(CBM_SKILL_COUNT, 4);
+    ASSERT_EQ(CBM_SKILL_COUNT, 7);
 
     /* Check exploring skill */
     bool found_exploring = false, found_tracing = false;
-    bool found_quality = false, found_reference = false;
+    bool found_quality = false, found_fix = false;
+    bool found_refactor = false, found_investigate = false;
+    bool found_reference = false;
     for (int i = 0; i < CBM_SKILL_COUNT; i++) {
         if (strcmp(sk[i].name, "codebase-memory-exploring") == 0) {
             found_exploring = true;
@@ -554,6 +556,21 @@ TEST(cli_skill_files_content) {
             ASSERT(strstr(sk[i].content, "max_degree=0") != NULL);
             ASSERT(strstr(sk[i].content, "exclude_entry_points") != NULL);
         }
+        if (strcmp(sk[i].name, "codebase-memory-fix") == 0) {
+            found_fix = true;
+            ASSERT(strstr(sk[i].content, "task_type=\"fix\"") != NULL);
+            ASSERT(strstr(sk[i].content, "get_tests") != NULL);
+        }
+        if (strcmp(sk[i].name, "codebase-memory-refactor") == 0) {
+            found_refactor = true;
+            ASSERT(strstr(sk[i].content, "task_type=\"refactor\"") != NULL);
+            ASSERT(strstr(sk[i].content, "get_related_files") != NULL);
+        }
+        if (strcmp(sk[i].name, "codebase-memory-investigate") == 0) {
+            found_investigate = true;
+            ASSERT(strstr(sk[i].content, "task_type=\"investigate\"") != NULL);
+            ASSERT(strstr(sk[i].content, "trace_call_path") != NULL);
+        }
         if (strcmp(sk[i].name, "codebase-memory-reference") == 0) {
             found_reference = true;
             ASSERT(strstr(sk[i].content, "query_graph") != NULL);
@@ -564,6 +581,9 @@ TEST(cli_skill_files_content) {
     ASSERT_TRUE(found_exploring);
     ASSERT_TRUE(found_tracing);
     ASSERT_TRUE(found_quality);
+    ASSERT_TRUE(found_fix);
+    ASSERT_TRUE(found_refactor);
+    ASSERT_TRUE(found_investigate);
     ASSERT_TRUE(found_reference);
     PASS();
 }
@@ -579,6 +599,7 @@ TEST(cli_codex_instructions) {
     ASSERT(strstr(instr, "get_file_context") != NULL);
     ASSERT(strstr(instr, "get_change_risks") != NULL);
     ASSERT(strstr(instr, "trace_call_path") != NULL);
+    ASSERT(strstr(instr, ".codex/playbooks/") != NULL);
     PASS();
 }
 
@@ -592,6 +613,7 @@ TEST(cli_gemini_instructions) {
     ASSERT(strstr(instr, "task_type=\"fix\"") != NULL);
     ASSERT(strstr(instr, "get_file_context") != NULL);
     ASSERT(strstr(instr, "get_change_risks") != NULL);
+    ASSERT(strstr(instr, ".gemini/playbooks/") != NULL);
     PASS();
 }
 
@@ -1138,6 +1160,51 @@ TEST(cli_install_and_uninstall) {
     PASS();
 }
 
+TEST(cli_playbooks_install_and_remove) {
+    char tmpdir[256]; snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-playbooks-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        SKIP("cbm_mkdtemp failed");
+
+    char playbooks_dir[512];
+    snprintf(playbooks_dir, sizeof(playbooks_dir), "%s/.codex/playbooks", tmpdir);
+
+    int written = cbm_install_playbooks(playbooks_dir, false, false);
+    ASSERT_EQ(written, 3);
+
+    char path[1024];
+    struct stat st;
+    snprintf(path, sizeof(path), "%s/fix.md", playbooks_dir);
+    ASSERT_EQ(stat(path, &st), 0);
+    const char *data = read_test_file(path);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "task_type=\"fix\"") != NULL);
+
+    snprintf(path, sizeof(path), "%s/refactor.md", playbooks_dir);
+    ASSERT_EQ(stat(path, &st), 0);
+    data = read_test_file(path);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "task_type=\"refactor\"") != NULL);
+
+    snprintf(path, sizeof(path), "%s/investigate.md", playbooks_dir);
+    ASSERT_EQ(stat(path, &st), 0);
+    data = read_test_file(path);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "task_type=\"investigate\"") != NULL);
+
+    int removed = cbm_remove_playbooks(playbooks_dir, false);
+    ASSERT_EQ(removed, 3);
+
+    snprintf(path, sizeof(path), "%s/fix.md", playbooks_dir);
+    ASSERT(stat(path, &st) != 0);
+    snprintf(path, sizeof(path), "%s/refactor.md", playbooks_dir);
+    ASSERT(stat(path, &st) != 0);
+    snprintf(path, sizeof(path), "%s/investigate.md", playbooks_dir);
+    ASSERT(stat(path, &st) != 0);
+
+    test_rmdir_r(tmpdir);
+    PASS();
+}
+
 TEST(cli_cmd_install_multi_client_smoke) {
     char tmpdir[256]; snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-home-XXXXXX");
     if (!cbm_mkdtemp(tmpdir))
@@ -1180,6 +1247,24 @@ TEST(cli_cmd_install_multi_client_smoke) {
     ASSERT(strstr(data, "task_type=\"fix\"") != NULL);
     ASSERT(strstr(data, "get_file_context") != NULL);
 
+    snprintf(path, sizeof(path), "%s/.claude/playbooks/fix.md", tmpdir);
+    ASSERT_EQ(stat(path, &st), 0);
+    data = read_test_file(path);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "task_type=\"fix\"") != NULL);
+
+    snprintf(path, sizeof(path), "%s/.claude/playbooks/refactor.md", tmpdir);
+    ASSERT_EQ(stat(path, &st), 0);
+    data = read_test_file(path);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "task_type=\"refactor\"") != NULL);
+
+    snprintf(path, sizeof(path), "%s/.claude/playbooks/investigate.md", tmpdir);
+    ASSERT_EQ(stat(path, &st), 0);
+    data = read_test_file(path);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "task_type=\"investigate\"") != NULL);
+
     snprintf(path, sizeof(path), "%s/.claude/.mcp.json", tmpdir);
     data = read_test_file(path);
     ASSERT_NOT_NULL(data);
@@ -1212,6 +1297,25 @@ TEST(cli_cmd_install_multi_client_smoke) {
     ASSERT(strstr(data, "get_file_context") != NULL);
     ASSERT(strstr(data, "get_change_risks") != NULL);
     ASSERT(strstr(data, "Recommended order") == NULL);
+    ASSERT(strstr(data, ".codex/playbooks/") != NULL);
+
+    snprintf(path, sizeof(path), "%s/.codex/playbooks/fix.md", tmpdir);
+    ASSERT_EQ(stat(path, &st), 0);
+    data = read_test_file(path);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "task_type=\"fix\"") != NULL);
+
+    snprintf(path, sizeof(path), "%s/.codex/playbooks/refactor.md", tmpdir);
+    ASSERT_EQ(stat(path, &st), 0);
+    data = read_test_file(path);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "task_type=\"refactor\"") != NULL);
+
+    snprintf(path, sizeof(path), "%s/.codex/playbooks/investigate.md", tmpdir);
+    ASSERT_EQ(stat(path, &st), 0);
+    data = read_test_file(path);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "task_type=\"investigate\"") != NULL);
 
     snprintf(path, sizeof(path), "%s/.gemini/settings.json", tmpdir);
     data = read_test_file(path);
@@ -1228,6 +1332,25 @@ TEST(cli_cmd_install_multi_client_smoke) {
     ASSERT(strstr(data, "mode=\"compact\"") != NULL);
     ASSERT(strstr(data, "task_type=\"fix\"") != NULL);
     ASSERT(strstr(data, "get_change_risks") != NULL);
+    ASSERT(strstr(data, ".gemini/playbooks/") != NULL);
+
+    snprintf(path, sizeof(path), "%s/.gemini/playbooks/fix.md", tmpdir);
+    ASSERT_EQ(stat(path, &st), 0);
+    data = read_test_file(path);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "task_type=\"fix\"") != NULL);
+
+    snprintf(path, sizeof(path), "%s/.gemini/playbooks/refactor.md", tmpdir);
+    ASSERT_EQ(stat(path, &st), 0);
+    data = read_test_file(path);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "task_type=\"refactor\"") != NULL);
+
+    snprintf(path, sizeof(path), "%s/.gemini/playbooks/investigate.md", tmpdir);
+    ASSERT_EQ(stat(path, &st), 0);
+    data = read_test_file(path);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "task_type=\"investigate\"") != NULL);
 
     data = read_test_file(bashrc);
     ASSERT_NOT_NULL(data);
@@ -1295,6 +1418,13 @@ TEST(cli_cmd_uninstall_multi_client_smoke) {
     snprintf(path, sizeof(path), "%s/.claude/skills/codebase-memory-exploring/SKILL.md", tmpdir);
     ASSERT(stat(path, &st) != 0);
 
+    snprintf(path, sizeof(path), "%s/.claude/playbooks/fix.md", tmpdir);
+    ASSERT(stat(path, &st) != 0);
+    snprintf(path, sizeof(path), "%s/.claude/playbooks/refactor.md", tmpdir);
+    ASSERT(stat(path, &st) != 0);
+    snprintf(path, sizeof(path), "%s/.claude/playbooks/investigate.md", tmpdir);
+    ASSERT(stat(path, &st) != 0);
+
     snprintf(path, sizeof(path), "%s/.claude/.mcp.json", tmpdir);
     data = read_test_file(path);
     ASSERT_NOT_NULL(data);
@@ -1320,6 +1450,13 @@ TEST(cli_cmd_uninstall_multi_client_smoke) {
     ASSERT_NOT_NULL(data);
     ASSERT(strstr(data, "codebase-memory-mcp:start") == NULL);
 
+    snprintf(path, sizeof(path), "%s/.codex/playbooks/fix.md", tmpdir);
+    ASSERT(stat(path, &st) != 0);
+    snprintf(path, sizeof(path), "%s/.codex/playbooks/refactor.md", tmpdir);
+    ASSERT(stat(path, &st) != 0);
+    snprintf(path, sizeof(path), "%s/.codex/playbooks/investigate.md", tmpdir);
+    ASSERT(stat(path, &st) != 0);
+
     snprintf(path, sizeof(path), "%s/.gemini/settings.json", tmpdir);
     data = read_test_file(path);
     ASSERT_NOT_NULL(data);
@@ -1329,6 +1466,13 @@ TEST(cli_cmd_uninstall_multi_client_smoke) {
     data = read_test_file(path);
     ASSERT_NOT_NULL(data);
     ASSERT(strstr(data, "codebase-memory-mcp:start") == NULL);
+
+    snprintf(path, sizeof(path), "%s/.gemini/playbooks/fix.md", tmpdir);
+    ASSERT(stat(path, &st) != 0);
+    snprintf(path, sizeof(path), "%s/.gemini/playbooks/refactor.md", tmpdir);
+    ASSERT(stat(path, &st) != 0);
+    snprintf(path, sizeof(path), "%s/.gemini/playbooks/investigate.md", tmpdir);
+    ASSERT(stat(path, &st) != 0);
 
     if (old_home) {
         cbm_setenv("HOME", old_home, 1);
@@ -2316,6 +2460,7 @@ SUITE(cli) {
 
     /* Full lifecycle (3 tests — cli_test.go + smoke install flow) */
     RUN_TEST(cli_install_and_uninstall);
+    RUN_TEST(cli_playbooks_install_and_remove);
     RUN_TEST(cli_cmd_install_multi_client_smoke);
     RUN_TEST(cli_cmd_uninstall_multi_client_smoke);
 
