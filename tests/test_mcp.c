@@ -4287,6 +4287,66 @@ TEST(delete_project_does_not_remap_empty_alias_to_populated_candidate) {
     PASS();
 }
 
+/* list_projects and project resolution must share the same definition of a
+ * live project. A rootless zero-node shadow sorted before a valid database must
+ * not consume the page or inflate total/has_more. */
+TEST(list_projects_hides_empty_shadow_before_pagination) {
+    char cache[CBM_SZ_256];
+    snprintf(cache, sizeof(cache), "/tmp/cbm-list-shadow-XXXXXX");
+    if (!cbm_mkdtemp(cache)) {
+        FAIL("mkdtemp failed");
+    }
+
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache_copy = saved_cache ? cbm_strdup(saved_cache) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    static const char shadow[] = "a-empty-shadow-list1734";
+    static const char live_project[] = "z-live-project-list1734";
+    char db_path[CBM_SZ_512];
+    snprintf(db_path, sizeof(db_path), "%s/%s.db", cache, shadow);
+    ASSERT_TRUE(mcp_make_valid_project_store_at(db_path, shadow, ""));
+
+    snprintf(db_path, sizeof(db_path), "%s/%s.db", cache, live_project);
+    cbm_store_t *live = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(live);
+    ASSERT_EQ(cbm_store_upsert_project(live, live_project, "/workspace/live-list1734"),
+              CBM_STORE_OK);
+    cbm_node_t fn = {.project = live_project,
+                     .label = "Function",
+                     .name = "LiveListTarget",
+                     .qualified_name = "fixture.LiveListTarget",
+                     .file_path = "src/live.c",
+                     .start_line = 1,
+                     .end_line = 2};
+    ASSERT_GT(cbm_store_upsert_node(live, &fn), 0);
+    ASSERT_EQ(cbm_store_prepare_for_publish(live), CBM_STORE_OK);
+    cbm_store_close(live);
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    char *response = cbm_mcp_handle_tool(
+        srv, "list_projects", "{\"offset\":0,\"limit\":1,\"include_details\":true}");
+    bool shadow_hidden = response && strstr(response, shadow) == NULL;
+    bool live_listed = response && strstr(response, live_project) != NULL;
+    bool pagination_accurate = response && strstr(response, "\\\"total\\\":1") &&
+                               strstr(response, "\\\"returned\\\":1") &&
+                               strstr(response, "\\\"has_more\\\":false");
+
+    free(response);
+    cbm_mcp_server_free(srv);
+    cleanup_project_db(cache, shadow);
+    cleanup_project_db(cache, live_project);
+    cbm_rmdir(cache);
+    restore_cache_dir(saved_cache_copy);
+    free(saved_cache_copy);
+
+    ASSERT_TRUE(shadow_hidden);
+    ASSERT_TRUE(live_listed);
+    ASSERT_TRUE(pagination_accurate);
+    PASS();
+}
+
 /* Regression for #604: path scopes architecture totals and content. */
 TEST(tool_get_architecture_path_scoping) {
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
@@ -11555,6 +11615,7 @@ SUITE(mcp) {
     RUN_TEST(project_resolution_does_not_prefer_empty_shadow);
     RUN_TEST(project_resolution_rejects_ambiguous_populated_alias);
     RUN_TEST(delete_project_does_not_remap_empty_alias_to_populated_candidate);
+    RUN_TEST(list_projects_hides_empty_shadow_before_pagination);
     RUN_TEST(tool_get_architecture_path_scoping);
     RUN_TEST(tool_query_graph_missing_query);
 
