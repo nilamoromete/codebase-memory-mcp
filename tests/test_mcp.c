@@ -4092,6 +4092,65 @@ TEST(tool_project_arg_resolves_unique_tail_issue1025) {
     PASS();
 }
 
+/* An empty exact-name database can be left behind by an older client while a
+ * populated, path-derived project for the same folder also exists. The short
+ * folder alias must not silently bind queries to that plausible empty graph
+ * when exactly one populated tail candidate is available. */
+TEST(project_resolution_does_not_prefer_empty_shadow) {
+    char cache[CBM_SZ_256];
+    snprintf(cache, sizeof(cache), "/tmp/cbm-empty-shadow-XXXXXX");
+    if (!cbm_mkdtemp(cache)) {
+        FAIL("mkdtemp failed");
+    }
+
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache_copy = saved_cache ? cbm_strdup(saved_cache) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    static const char alias[] = "aliat1734";
+    static const char populated_project[] = "C-opencoder-aliat1734";
+    char empty_path[CBM_SZ_512];
+    char populated_path[CBM_SZ_512];
+    snprintf(empty_path, sizeof(empty_path), "%s/%s.db", cache, alias);
+    snprintf(populated_path, sizeof(populated_path), "%s/%s.db", cache, populated_project);
+    ASSERT_TRUE(mcp_make_valid_project_store_at(empty_path, alias, ""));
+
+    cbm_store_t *populated = cbm_store_open_path(populated_path);
+    ASSERT_NOT_NULL(populated);
+    ASSERT_EQ(cbm_store_upsert_project(populated, populated_project, "/workspace/aliat1734"),
+              CBM_STORE_OK);
+    cbm_node_t fn = {.project = populated_project,
+                     .label = "Function",
+                     .name = "PopulatedGraphTarget",
+                     .qualified_name = "fixture.PopulatedGraphTarget",
+                     .file_path = "src/populated.c",
+                     .start_line = 1,
+                     .end_line = 2};
+    ASSERT_GT(cbm_store_upsert_node(populated, &fn), 0);
+    ASSERT_EQ(cbm_store_prepare_for_publish(populated), CBM_STORE_OK);
+    cbm_store_close(populated);
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    char *response = cbm_mcp_handle_tool(
+        srv, "search_graph",
+        "{\"project\":\"aliat1734\",\"name_pattern\":\"PopulatedGraphTarget\"}");
+    bool selected_populated = response && strstr(response, "PopulatedGraphTarget") != NULL;
+
+    free(response);
+    cbm_mcp_server_free(srv);
+    if (saved_cache_copy) {
+        cbm_setenv("CBM_CACHE_DIR", saved_cache_copy, 1);
+        free(saved_cache_copy);
+    } else {
+        cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    th_rmtree(cache);
+
+    ASSERT_TRUE(selected_populated);
+    PASS();
+}
+
 /* Regression for #604: path scopes architecture totals and content. */
 TEST(tool_get_architecture_path_scoping) {
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
@@ -11357,6 +11416,7 @@ SUITE(mcp) {
     RUN_TEST(tool_get_architecture_accepts_project_name_alias_issue640);
     RUN_TEST(tool_search_graph_accepts_project_name_alias_issue640);
     RUN_TEST(tool_project_arg_resolves_unique_tail_issue1025);
+    RUN_TEST(project_resolution_does_not_prefer_empty_shadow);
     RUN_TEST(tool_get_architecture_path_scoping);
     RUN_TEST(tool_query_graph_missing_query);
 
