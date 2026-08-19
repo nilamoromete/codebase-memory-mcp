@@ -14,7 +14,7 @@ Usage: scripts/test.sh [--suites LIST] [--arch ARCH] [VAR=VAL ...]
 
 The canonical test entry: identical in local CI, PR CI, dry run and release.
 DEFAULT (no --suites) is exactly what CI runs: static contract checks
-(Step 0a-0t), a CLEAN sanitizer build, every suite via the parallel harness,
+(Step 0a-0v), a CLEAN sanitizer build, every suite via the parallel harness,
 then the prod-binary regression guards (Steps 4-6).
 
 Modes:
@@ -262,6 +262,9 @@ bash "$ROOT/tests/test_runtime_isolation_contract.sh"
 
 echo "=== Step 0u: shell line-ending contract ==="
 bash "$ROOT/tests/test_shell_line_endings.sh"
+
+echo "=== Step 0v: agent workflow benchmark contract ==="
+python3 "$ROOT/tests/test_workflow_benchmark_contract.py"
 
 # Verify compiler supports target arch
 verify_compiler "$CC"

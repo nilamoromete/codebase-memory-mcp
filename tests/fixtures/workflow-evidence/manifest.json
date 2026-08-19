@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "suite_id": "workflow-evidence-public-v1",
+  "arms": [
+    "A",
+    "B",
+    "C"
+  ],
+  "model": {
+    "name": "record-at-run-time",
+    "reasoning": "fixed-per-comparison"
+  },
+  "base_commit": "0000000000000000000000000000000000000000",
+  "tasks": [
+    {
+      "id": "c-overflow-001",
+      "language": "c",
+      "category": "fix",
+      "prompt": "Change add_one to saturate at INT_MAX without changing callers, and identify the narrowest regression test.",
+      "prompt_sha256": "59076438248ed48d182699e52b05f7127529a99f1330b293636e5c0da6b02caf",
+      "source_paths": [
+        "tests/fixtures/workflow-evidence/c-small/src/math.c"
+      ],
+      "expected_callers": [
+        "tests/fixtures/workflow-evidence/c-small/src/controller.c"
+      ],
+      "expected_tests": [
+        "tests/fixtures/workflow-evidence/c-small/tests/test_math.c"
+      ],
+      "time_limit_seconds": 300,
+      "tool_call_budget": 12
+    },
+    {
+      "id": "typescript-rename-001",
+      "language": "typescript",
+      "category": "refactor",
+      "prompt": "Rename formatUserLabel to formatDisplayName without breaking its public caller or test contract.",
+      "prompt_sha256": "76a939bdba7c8e21844b14129d767fbf6da60e0da7ae14ade06ca3d0215822ea",
+      "source_paths": [
+        "tests/fixtures/workflow-evidence/typescript-small/src/formatter.ts"
+      ],
+      "expected_callers": [
+        "tests/fixtures/workflow-evidence/typescript-small/src/profile.ts"
+      ],
+      "expected_tests": [
+        "tests/fixtures/workflow-evidence/typescript-small/tests/formatter.test.ts"
+      ],
+      "time_limit_seconds": 300,
+      "tool_call_budget": 12
+    }
+  ]
+}
