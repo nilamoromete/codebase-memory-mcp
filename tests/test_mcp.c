@@ -4216,6 +4216,68 @@ TEST(project_resolution_rejects_ambiguous_populated_alias) {
     PASS();
 }
 
+/* Read-only alias convenience must never change the identity of a destructive
+ * operation. When an empty exact alias shadows one populated tail candidate,
+ * delete_project(alias) deletes only the exact alias database and preserves
+ * the populated graph. */
+TEST(delete_project_does_not_remap_empty_alias_to_populated_candidate) {
+    char cache[CBM_SZ_256];
+    snprintf(cache, sizeof(cache), "/tmp/cbm-delete-shadow-XXXXXX");
+    if (!cbm_mkdtemp(cache)) {
+        FAIL("mkdtemp failed");
+    }
+
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache_copy = saved_cache ? cbm_strdup(saved_cache) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    static const char alias[] = "deleteshadow1734";
+    static const char populated_project[] = "C-opencoder-deleteshadow1734";
+    char alias_path[CBM_SZ_512];
+    char populated_path[CBM_SZ_512];
+    snprintf(alias_path, sizeof(alias_path), "%s/%s.db", cache, alias);
+    snprintf(populated_path, sizeof(populated_path), "%s/%s.db", cache, populated_project);
+    ASSERT_TRUE(mcp_make_valid_project_store_at(alias_path, alias, ""));
+
+    cbm_store_t *populated = cbm_store_open_path(populated_path);
+    ASSERT_NOT_NULL(populated);
+    ASSERT_EQ(cbm_store_upsert_project(populated, populated_project,
+                                       "/workspace/deleteshadow1734"),
+              CBM_STORE_OK);
+    cbm_node_t fn = {.project = populated_project,
+                     .label = "Function",
+                     .name = "PreservedDeleteTarget",
+                     .qualified_name = "fixture.PreservedDeleteTarget",
+                     .file_path = "src/preserved.c",
+                     .start_line = 1,
+                     .end_line = 2};
+    ASSERT_GT(cbm_store_upsert_node(populated, &fn), 0);
+    ASSERT_EQ(cbm_store_prepare_for_publish(populated), CBM_STORE_OK);
+    cbm_store_close(populated);
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    char *response =
+        cbm_mcp_handle_tool(srv, "delete_project", "{\"project\":\"deleteshadow1734\"}");
+    bool reported_exact_alias = response && strstr(response, alias) != NULL &&
+                                strstr(response, populated_project) == NULL;
+    bool exact_alias_deleted = !cbm_file_exists(alias_path);
+    bool populated_preserved = cbm_file_exists(populated_path);
+
+    free(response);
+    cbm_mcp_server_free(srv);
+    cleanup_project_db(cache, alias);
+    cleanup_project_db(cache, populated_project);
+    cbm_rmdir(cache);
+    restore_cache_dir(saved_cache_copy);
+    free(saved_cache_copy);
+
+    ASSERT_TRUE(reported_exact_alias);
+    ASSERT_TRUE(exact_alias_deleted);
+    ASSERT_TRUE(populated_preserved);
+    PASS();
+}
+
 /* Regression for #604: path scopes architecture totals and content. */
 TEST(tool_get_architecture_path_scoping) {
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
@@ -11483,6 +11545,7 @@ SUITE(mcp) {
     RUN_TEST(tool_project_arg_resolves_unique_tail_issue1025);
     RUN_TEST(project_resolution_does_not_prefer_empty_shadow);
     RUN_TEST(project_resolution_rejects_ambiguous_populated_alias);
+    RUN_TEST(delete_project_does_not_remap_empty_alias_to_populated_candidate);
     RUN_TEST(tool_get_architecture_path_scoping);
     RUN_TEST(tool_query_graph_missing_query);
 
