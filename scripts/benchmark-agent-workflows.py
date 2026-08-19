@@ -21,6 +21,8 @@ COMPARABILITY_FIELDS = (
     "task_id",
     "model",
     "reasoning",
+    "hardware",
+    "risk_class",
     "prompt_sha256",
     "base_commit",
     "time_limit_seconds",
@@ -96,6 +98,7 @@ def validate_manifest(path: Path) -> dict[str, Any]:
         raise ValueError("model must be an object")
     _require_non_empty_string(model.get("name"), "model.name")
     _require_non_empty_string(model.get("reasoning"), "model.reasoning")
+    _require_non_empty_string(manifest.get("hardware"), "hardware")
     _require_hex_digest(manifest.get("base_commit"), 40, "base_commit")
     suite_id = manifest.get("suite_id")
     tasks = manifest.get("tasks")
@@ -121,6 +124,8 @@ def validate_manifest(path: Path) -> dict[str, Any]:
             raise ValueError(
                 f"tasks[{index}].category must be fix, refactor, or investigate"
             )
+        if task.get("risk_class") not in ("ordinary", "high"):
+            raise ValueError(f"tasks[{index}].risk_class must be ordinary or high")
         _require_positive_integer(
             task.get("time_limit_seconds"), f"tasks[{index}].time_limit_seconds"
         )
@@ -167,6 +172,8 @@ def _validate_manifest_binding(
             "suite_id": manifest["suite_id"],
             "model": model["name"],
             "reasoning": model["reasoning"],
+            "hardware": manifest["hardware"],
+            "risk_class": task["risk_class"],
             "prompt_sha256": task["prompt_sha256"],
             "base_commit": manifest["base_commit"],
             "time_limit_seconds": task["time_limit_seconds"],
@@ -203,8 +210,10 @@ def validate_runs(path: Path, manifest_path: Path | None = None) -> dict[str, An
             raise ValueError(f"duplicate record for task {task_id} arm {arm}")
         by_arm[arm] = record
 
-        for field in ("suite_id", "model", "reasoning"):
+        for field in ("suite_id", "model", "reasoning", "hardware"):
             _require_non_empty_string(record.get(field), f"record {index}.{field}")
+        if record.get("risk_class") not in ("ordinary", "high"):
+            raise ValueError(f"record {index}.risk_class must be ordinary or high")
         _require_hex_digest(
             record.get("prompt_sha256"), 64, f"record {index}.prompt_sha256"
         )
@@ -219,6 +228,15 @@ def validate_runs(path: Path, manifest_path: Path | None = None) -> dict[str, An
         token_usage = record.get("token_usage")
         if not isinstance(token_usage, dict):
             raise ValueError(f"record {index}.token_usage must be an object")
+        accounting_method = token_usage.get("accounting_method")
+        if accounting_method not in ("provider", "estimate"):
+            raise ValueError(
+                f"record {index}.token_usage.accounting_method must be provider or estimate"
+            )
+        if accounting_method == "estimate":
+            _require_non_empty_string(
+                token_usage.get("tokenizer"), f"record {index}.token_usage.tokenizer"
+            )
         values: list[int] = []
         for field in TOKEN_COMPONENTS:
             value = token_usage.get(field)
@@ -254,6 +272,17 @@ def validate_runs(path: Path, manifest_path: Path | None = None) -> dict[str, An
             raise ValueError(
                 f"record {index}.metrics.latency_ms must be a finite non-negative number"
             )
+        primitive_latency_ms = metrics.get("single_primitive_latency_ms")
+        if (
+            not isinstance(primitive_latency_ms, (int, float))
+            or isinstance(primitive_latency_ms, bool)
+            or not math.isfinite(float(primitive_latency_ms))
+            or primitive_latency_ms < 0
+        ):
+            raise ValueError(
+                f"record {index}.metrics.single_primitive_latency_ms must be a finite "
+                "non-negative number"
+            )
         blind_score = record.get("blind_score")
         if not isinstance(blind_score, dict):
             raise ValueError(f"record {index}.blind_score must be an object")
@@ -286,6 +315,16 @@ def validate_runs(path: Path, manifest_path: Path | None = None) -> dict[str, An
                     raise ValueError(
                         f"task {task_id} field {field} differs between arms A and {arm}"
                     )
+            for container, field in (
+                ("token_usage", "accounting_method"),
+                ("token_usage", "tokenizer"),
+                ("metrics", "single_primitive_latency_ms"),
+            ):
+                if candidate[container].get(field) != reference[container].get(field):
+                    raise ValueError(
+                        f"task {task_id} field {container}.{field} differs between arms "
+                        f"A and {arm}"
+                    )
 
     if manifest_path is not None:
         _validate_manifest_binding(grouped, manifest_path)
@@ -308,7 +347,7 @@ def _percentile(values: list[float], percentile: float) -> float:
 def _arm_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
     metrics = [record["metrics"] for record in records]
     token_usage = [record["token_usage"] for record in records]
-    return {
+    summary = {
         "run_count": len(records),
         "targeted_test_pass_rate": round(
             mean(1.0 if item["targeted_tests_pass"] else 0.0 for item in metrics), 6
@@ -331,6 +370,12 @@ def _arm_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
         "p95_latency_ms": round(
             _percentile([float(item["latency_ms"]) for item in metrics], 0.95), 6
         ),
+        "p95_single_primitive_latency_ms": round(
+            _percentile(
+                [float(item["single_primitive_latency_ms"]) for item in metrics], 0.95
+            ),
+            6,
+        ),
         "p95_compact_response_tokens": round(
             _percentile(
                 [float(item["compact_response_tokens"]) for item in metrics], 0.95
@@ -341,6 +386,11 @@ def _arm_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
             mean(float(record["blind_score"]["score"]) for record in records), 6
         ),
     }
+    for component in TOKEN_COMPONENTS:
+        summary[f"mean_{component}"] = round(
+            mean(float(item[component]) for item in token_usage), 6
+        )
+    return summary
 
 
 def _reduction_percent(baseline: float, candidate: float) -> float:
@@ -388,6 +438,37 @@ def _paired_boolean_delta_ci(
     }
 
 
+def _high_risk_has_no_regression(
+    baseline_records: list[dict[str, Any]], candidate_records: list[dict[str, Any]]
+) -> bool:
+    baseline = {
+        record["task_id"]: record
+        for record in baseline_records
+        if record["risk_class"] == "high"
+    }
+    candidate = {
+        record["task_id"]: record
+        for record in candidate_records
+        if record["risk_class"] == "high"
+    }
+    if not baseline or set(baseline) != set(candidate):
+        return False
+    for task_id, baseline_record in baseline.items():
+        baseline_metrics = baseline_record["metrics"]
+        candidate_metrics = candidate[task_id]["metrics"]
+        if baseline_metrics["targeted_tests_pass"] and not candidate_metrics[
+            "targeted_tests_pass"
+        ]:
+            return False
+        if baseline_metrics["hidden_tests_pass"] and not candidate_metrics[
+            "hidden_tests_pass"
+        ]:
+            return False
+        if candidate_metrics["regression_escapes"] > baseline_metrics["regression_escapes"]:
+            return False
+    return True
+
+
 def score_runs(path: Path, manifest_path: Path | None = None) -> dict[str, Any]:
     validation = validate_runs(path, manifest_path)
     records = _load_jsonl(path)
@@ -401,6 +482,17 @@ def score_runs(path: Path, manifest_path: Path | None = None) -> dict[str, Any]:
         "total_token_reduction_percent": _reduction_percent(
             baseline["mean_total_tokens"], candidate["mean_total_tokens"]
         ),
+        "targeted_test_pass_delta_points": round(
+            (
+                candidate["targeted_test_pass_rate"]
+                - baseline["targeted_test_pass_rate"]
+            )
+            * 100.0,
+            6,
+        ),
+        "targeted_test_pass_delta_ci95_points": _paired_boolean_delta_ci(
+            by_arm["B"], by_arm["C"], "targeted_tests_pass"
+        ),
         "hidden_test_pass_delta_points": round(
             (candidate["hidden_test_pass_rate"] - baseline["hidden_test_pass_rate"])
             * 100.0,
@@ -408,6 +500,9 @@ def score_runs(path: Path, manifest_path: Path | None = None) -> dict[str, Any]:
         ),
         "hidden_test_pass_delta_ci95_points": _paired_boolean_delta_ci(
             by_arm["B"], by_arm["C"], "hidden_tests_pass"
+        ),
+        "mean_blind_score_delta_points": round(
+            candidate["mean_blind_score"] - baseline["mean_blind_score"], 6
         ),
         "unnecessary_file_reduction_percent": _reduction_percent(
             baseline["mean_unnecessary_files"], candidate["mean_unnecessary_files"]
@@ -428,8 +523,20 @@ def score_runs(path: Path, manifest_path: Path | None = None) -> dict[str, Any]:
         "wrong_project_zero": candidate["wrong_project_count"] == 0,
         "unsafe_empty_zero": candidate["unsafe_empty_count"] == 0,
         "contradiction_zero": candidate["contradiction_count"] == 0,
+        "targeted_test_delta_at_least_10_points": (
+            comparison["targeted_test_pass_delta_points"] >= 10.0
+        ),
+        "targeted_test_delta_ci_nonnegative": (
+            comparison["targeted_test_pass_delta_ci95_points"]["low"] >= 0.0
+        ),
         "hidden_test_delta_at_least_10_points": (
             comparison["hidden_test_pass_delta_points"] >= 10.0
+        ),
+        "hidden_test_delta_ci_nonnegative": (
+            comparison["hidden_test_pass_delta_ci95_points"]["low"] >= 0.0
+        ),
+        "high_risk_no_regression": _high_risk_has_no_regression(
+            by_arm["B"], by_arm["C"]
         ),
         "unnecessary_files_reduced_at_least_20_percent": (
             candidate["mean_unnecessary_files"]
@@ -448,6 +555,10 @@ def score_runs(path: Path, manifest_path: Path | None = None) -> dict[str, Any]:
         ),
         "latency_reduced_at_least_40_percent": (
             comparison["latency_reduction_percent"] >= 40.0
+        ),
+        "latency_within_1_2x_single_primitive": (
+            candidate["p95_latency_ms"]
+            <= candidate["p95_single_primitive_latency_ms"] * 1.2
         ),
     }
     return {

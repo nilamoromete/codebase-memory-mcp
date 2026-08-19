@@ -25,6 +25,7 @@ def _task(task_id: str = "c-caller-001") -> dict[str, object]:
         "id": task_id,
         "language": "c",
         "category": "investigate",
+        "risk_class": "high",
         "prompt": prompt,
         "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
         "source_paths": ["tests/fixtures/workflow-evidence/c-small/src/math.c"],
@@ -39,6 +40,7 @@ def _manifest() -> dict[str, object]:
         "suite_id": "workflow-evidence-v1",
         "arms": ["A", "B", "C"],
         "model": {"name": "fixture-model", "reasoning": "fixed"},
+        "hardware": "fixture-hardware",
         "base_commit": "0" * 40,
         "tasks": [_task()],
     }
@@ -65,11 +67,14 @@ def _run_record(arm: str) -> dict[str, object]:
         "arm": arm,
         "model": "fixture-model",
         "reasoning": "fixed",
+        "hardware": "fixture-hardware",
+        "risk_class": "high",
         "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
         "base_commit": "0" * 40,
         "time_limit_seconds": 300,
         "tool_call_budget": 12,
         "token_usage": {
+            "accounting_method": "provider",
             "tool_schema_tokens": 100,
             "tool_argument_tokens": 20,
             "tool_response_tokens": 200,
@@ -85,6 +90,7 @@ def _run_record(arm: str) -> dict[str, object]:
             "unsafe_empty": False,
             "contradiction": False,
             "latency_ms": 100.0,
+            "single_primitive_latency_ms": 100.0,
             "compact_response_tokens": 200,
         },
         "blind_score": {
@@ -192,6 +198,29 @@ class ManifestContractTests(unittest.TestCase):
                 payload = json.loads(result.stderr)
                 self.assertIn(field, payload["error"])
 
+    def test_validate_manifest_requires_hardware_and_risk_class(self) -> None:
+        manifest = _manifest()
+        del manifest["hardware"]
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_path = Path(tmp) / "manifest.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            result = _run_cli("validate-manifest", str(manifest_path))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("hardware", json.loads(result.stderr)["error"])
+
+        manifest = _manifest()
+        tasks = manifest["tasks"]
+        assert isinstance(tasks, list)
+        task = tasks[0]
+        assert isinstance(task, dict)
+        del task["risk_class"]
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_path = Path(tmp) / "manifest.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            result = _run_cli("validate-manifest", str(manifest_path))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("risk_class", json.loads(result.stderr)["error"])
+
     def test_repository_fixture_manifest_is_valid(self) -> None:
         result = _run_cli("validate-manifest", str(FIXTURE_MANIFEST))
 
@@ -229,21 +258,53 @@ class RunContractTests(unittest.TestCase):
         self.assertEqual(payload["arms"], ["A", "B", "C"])
 
     def test_validate_runs_rejects_missing_comparability_metadata(self) -> None:
+        for field in ("model", "hardware", "risk_class"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
+                records = [_run_record(arm) for arm in ("A", "B", "C")]
+                for record in records:
+                    del record[field]
+                runs_path = Path(tmp) / "runs.jsonl"
+                runs_path.write_text(
+                    "".join(json.dumps(record) + "\n" for record in records),
+                    encoding="utf-8",
+                )
+
+                result = _run_cli("validate-runs", str(runs_path))
+
+                self.assertEqual(result.returncode, 2)
+                payload = json.loads(result.stderr)
+                self.assertIn(field, payload["error"])
+
+    def test_validate_runs_requires_token_accounting_method(self) -> None:
         records = [_run_record(arm) for arm in ("A", "B", "C")]
         for record in records:
-            del record["model"]
+            token_usage = record["token_usage"]
+            assert isinstance(token_usage, dict)
+            del token_usage["accounting_method"]
         with tempfile.TemporaryDirectory() as tmp:
             runs_path = Path(tmp) / "runs.jsonl"
             runs_path.write_text(
                 "".join(json.dumps(record) + "\n" for record in records),
                 encoding="utf-8",
             )
-
             result = _run_cli("validate-runs", str(runs_path))
-
         self.assertEqual(result.returncode, 2)
-        payload = json.loads(result.stderr)
-        self.assertIn("model", payload["error"])
+        self.assertIn("accounting_method", json.loads(result.stderr)["error"])
+
+    def test_validate_runs_rejects_primitive_latency_mismatch(self) -> None:
+        records = [_run_record(arm) for arm in ("A", "B", "C")]
+        metrics = records[2]["metrics"]
+        assert isinstance(metrics, dict)
+        metrics["single_primitive_latency_ms"] = 120.0
+        with tempfile.TemporaryDirectory() as tmp:
+            runs_path = Path(tmp) / "runs.jsonl"
+            runs_path.write_text(
+                "".join(json.dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
+            result = _run_cli("validate-runs", str(runs_path))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("single_primitive_latency_ms", json.loads(result.stderr)["error"])
 
     def test_validate_runs_rejects_non_finite_latency(self) -> None:
         records = [_run_record(arm) for arm in ("A", "B", "C")]
@@ -351,6 +412,7 @@ class RunContractTests(unittest.TestCase):
         assert isinstance(c_metrics, dict)
         b_metrics.update(
             {
+                "targeted_tests_pass": False,
                 "hidden_tests_pass": False,
                 "unnecessary_files": 2,
                 "regression_escapes": 1,
@@ -375,6 +437,12 @@ class RunContractTests(unittest.TestCase):
         b_tokens["total_tokens"] = 1000
         c_tokens["completion_tokens"] = 280
         c_tokens["total_tokens"] = 600
+        b_score = records[1]["blind_score"]
+        c_score = records[2]["blind_score"]
+        assert isinstance(b_score, dict)
+        assert isinstance(c_score, dict)
+        b_score["score"] = 70
+        c_score["score"] = 90
 
         with tempfile.TemporaryDirectory() as tmp:
             runs_path = Path(tmp) / "runs.jsonl"
@@ -397,7 +465,15 @@ class RunContractTests(unittest.TestCase):
         self.assertEqual(summary["arms"]["C"]["mean_total_tokens"], 600.0)
         comparison = summary["comparison"]["C_vs_B"]
         self.assertEqual(comparison["total_token_reduction_percent"], 40.0)
+        self.assertEqual(comparison["targeted_test_pass_delta_points"], 100.0)
         self.assertEqual(comparison["hidden_test_pass_delta_points"], 100.0)
+        self.assertEqual(comparison["mean_blind_score_delta_points"], 20.0)
+        self.assertEqual(summary["arms"]["B"]["mean_tool_schema_tokens"], 100.0)
+        gates = summary["promotion"]["gates"]
+        self.assertTrue(gates["targeted_test_delta_at_least_10_points"])
+        self.assertTrue(gates["hidden_test_delta_ci_nonnegative"])
+        self.assertTrue(gates["high_risk_no_regression"])
+        self.assertTrue(gates["latency_within_1_2x_single_primitive"])
         self.assertTrue(summary["promotion"]["passed"])
 
     def test_score_reports_order_invariant_paired_confidence_interval(self) -> None:
