@@ -160,6 +160,38 @@ class ManifestContractTests(unittest.TestCase):
         payload = json.loads(result.stderr)
         self.assertIn("duplicate task id", payload["error"])
 
+    def test_validate_manifest_requires_frozen_protocol_metadata(self) -> None:
+        for field in ("schema_version", "arms", "model", "base_commit"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
+                manifest = _manifest()
+                del manifest[field]
+                manifest_path = Path(tmp) / "manifest.json"
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+                result = _run_cli("validate-manifest", str(manifest_path))
+
+                self.assertEqual(result.returncode, 2)
+                payload = json.loads(result.stderr)
+                self.assertIn(field, payload["error"])
+
+    def test_validate_manifest_requires_task_classification_and_budgets(self) -> None:
+        for field in ("language", "category", "time_limit_seconds", "tool_call_budget"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
+                manifest = _manifest()
+                tasks = manifest["tasks"]
+                assert isinstance(tasks, list)
+                task = tasks[0]
+                assert isinstance(task, dict)
+                del task[field]
+                manifest_path = Path(tmp) / "manifest.json"
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+                result = _run_cli("validate-manifest", str(manifest_path))
+
+                self.assertEqual(result.returncode, 2)
+                payload = json.loads(result.stderr)
+                self.assertIn(field, payload["error"])
+
     def test_repository_fixture_manifest_is_valid(self) -> None:
         result = _run_cli("validate-manifest", str(FIXTURE_MANIFEST))
 
@@ -195,6 +227,41 @@ class RunContractTests(unittest.TestCase):
         self.assertEqual(payload["record_count"], 3)
         self.assertEqual(payload["task_count"], 1)
         self.assertEqual(payload["arms"], ["A", "B", "C"])
+
+    def test_validate_runs_rejects_missing_comparability_metadata(self) -> None:
+        records = [_run_record(arm) for arm in ("A", "B", "C")]
+        for record in records:
+            del record["model"]
+        with tempfile.TemporaryDirectory() as tmp:
+            runs_path = Path(tmp) / "runs.jsonl"
+            runs_path.write_text(
+                "".join(json.dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
+
+            result = _run_cli("validate-runs", str(runs_path))
+
+        self.assertEqual(result.returncode, 2)
+        payload = json.loads(result.stderr)
+        self.assertIn("model", payload["error"])
+
+    def test_validate_runs_rejects_non_finite_latency(self) -> None:
+        records = [_run_record(arm) for arm in ("A", "B", "C")]
+        metrics = records[2]["metrics"]
+        assert isinstance(metrics, dict)
+        metrics["latency_ms"] = float("nan")
+        with tempfile.TemporaryDirectory() as tmp:
+            runs_path = Path(tmp) / "runs.jsonl"
+            runs_path.write_text(
+                "".join(json.dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
+
+            result = _run_cli("validate-runs", str(runs_path))
+
+        self.assertEqual(result.returncode, 2)
+        payload = json.loads(result.stderr)
+        self.assertIn("finite", payload["error"])
 
     def test_validate_runs_rejects_missing_safety_metric(self) -> None:
         records = [_run_record(arm) for arm in ("A", "B", "C")]

@@ -70,8 +70,33 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     return records
 
 
+def _require_non_empty_string(value: Any, field: str) -> None:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{field} must be a non-empty string")
+
+
+def _require_positive_integer(value: Any, field: str) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValueError(f"{field} must be a positive integer")
+
+
+def _require_hex_digest(value: Any, length: int, field: str) -> None:
+    if not isinstance(value, str) or not re.fullmatch(rf"[0-9a-f]{{{length}}}", value):
+        raise ValueError(f"{field} must be {length} lowercase hex characters")
+
+
 def validate_manifest(path: Path) -> dict[str, Any]:
     manifest = _load_json(path)
+    if manifest.get("schema_version") != 1:
+        raise ValueError("schema_version must be 1")
+    if manifest.get("arms") != list(ARMS):
+        raise ValueError(f"arms must be exactly {list(ARMS)}")
+    model = manifest.get("model")
+    if not isinstance(model, dict):
+        raise ValueError("model must be an object")
+    _require_non_empty_string(model.get("name"), "model.name")
+    _require_non_empty_string(model.get("reasoning"), "model.reasoning")
+    _require_hex_digest(manifest.get("base_commit"), 40, "base_commit")
     suite_id = manifest.get("suite_id")
     tasks = manifest.get("tasks")
     if not isinstance(suite_id, str) or not suite_id:
@@ -90,6 +115,18 @@ def validate_manifest(path: Path) -> dict[str, Any]:
         seen_task_ids.add(task_id)
         prompt = task.get("prompt")
         prompt_sha256 = task.get("prompt_sha256")
+        _require_non_empty_string(task.get("language"), f"tasks[{index}].language")
+        category = task.get("category")
+        if category not in ("fix", "refactor", "investigate"):
+            raise ValueError(
+                f"tasks[{index}].category must be fix, refactor, or investigate"
+            )
+        _require_positive_integer(
+            task.get("time_limit_seconds"), f"tasks[{index}].time_limit_seconds"
+        )
+        _require_positive_integer(
+            task.get("tool_call_budget"), f"tasks[{index}].tool_call_budget"
+        )
         if not isinstance(prompt, str) or not prompt:
             raise ValueError(f"tasks[{index}].prompt must be a non-empty string")
         expected_prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
@@ -116,7 +153,15 @@ def validate_manifest(path: Path) -> dict[str, Any]:
 def validate_runs(path: Path) -> dict[str, Any]:
     records = _load_jsonl(path)
     grouped: dict[str, dict[str, dict[str, Any]]] = {}
+    seen_run_ids: set[str] = set()
     for index, record in enumerate(records):
+        if record.get("schema_version") != 1:
+            raise ValueError(f"record {index}.schema_version must be 1")
+        run_id = record.get("run_id")
+        _require_non_empty_string(run_id, f"record {index}.run_id")
+        if run_id in seen_run_ids:
+            raise ValueError(f"duplicate run_id: {run_id}")
+        seen_run_ids.add(run_id)
         task_id = record.get("task_id")
         arm = record.get("arm")
         if not isinstance(task_id, str) or not task_id:
@@ -127,6 +172,19 @@ def validate_runs(path: Path) -> dict[str, Any]:
         if arm in by_arm:
             raise ValueError(f"duplicate record for task {task_id} arm {arm}")
         by_arm[arm] = record
+
+        for field in ("suite_id", "model", "reasoning"):
+            _require_non_empty_string(record.get(field), f"record {index}.{field}")
+        _require_hex_digest(
+            record.get("prompt_sha256"), 64, f"record {index}.prompt_sha256"
+        )
+        _require_hex_digest(record.get("base_commit"), 40, f"record {index}.base_commit")
+        _require_positive_integer(
+            record.get("time_limit_seconds"), f"record {index}.time_limit_seconds"
+        )
+        _require_positive_integer(
+            record.get("tool_call_budget"), f"record {index}.tool_call_budget"
+        )
 
         token_usage = record.get("token_usage")
         if not isinstance(token_usage, dict):
@@ -160,10 +218,11 @@ def validate_runs(path: Path) -> dict[str, Any]:
         if (
             not isinstance(latency_ms, (int, float))
             or isinstance(latency_ms, bool)
+            or not math.isfinite(float(latency_ms))
             or latency_ms < 0
         ):
             raise ValueError(
-                f"record {index}.metrics.latency_ms must be a non-negative number"
+                f"record {index}.metrics.latency_ms must be a finite non-negative number"
             )
         blind_score = record.get("blind_score")
         if not isinstance(blind_score, dict):
@@ -179,6 +238,7 @@ def validate_runs(path: Path) -> dict[str, Any]:
         if (
             not isinstance(score, (int, float))
             or isinstance(score, bool)
+            or not math.isfinite(float(score))
             or not 0 <= score <= 100
         ):
             raise ValueError(
