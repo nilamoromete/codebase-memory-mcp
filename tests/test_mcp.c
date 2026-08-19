@@ -4151,6 +4151,71 @@ TEST(project_resolution_does_not_prefer_empty_shadow) {
     PASS();
 }
 
+/* An empty exact-name shadow with multiple populated tail candidates is not a
+ * license to pick one or to return the shadow as an authoritative empty graph.
+ * Resolution must fail closed and expose the candidates in the normal
+ * project-not-found response. */
+TEST(project_resolution_rejects_ambiguous_populated_alias) {
+    char cache[CBM_SZ_256];
+    snprintf(cache, sizeof(cache), "/tmp/cbm-ambiguous-shadow-XXXXXX");
+    if (!cbm_mkdtemp(cache)) {
+        FAIL("mkdtemp failed");
+    }
+
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache_copy = saved_cache ? cbm_strdup(saved_cache) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    static const char alias[] = "ambshadow1734";
+    static const char candidate_a[] = "C-one-ambshadow1734";
+    static const char candidate_b[] = "D-two-ambshadow1734";
+    char db_path[CBM_SZ_512];
+    snprintf(db_path, sizeof(db_path), "%s/%s.db", cache, alias);
+    ASSERT_TRUE(mcp_make_valid_project_store_at(db_path, alias, ""));
+
+    const char *candidates[] = {candidate_a, candidate_b};
+    const char *roots[] = {"/workspace/one/ambshadow1734", "/workspace/two/ambshadow1734"};
+    const char *symbols[] = {"AmbiguousCandidateOne", "AmbiguousCandidateTwo"};
+    for (int i = 0; i < 2; i++) {
+        snprintf(db_path, sizeof(db_path), "%s/%s.db", cache, candidates[i]);
+        cbm_store_t *store = cbm_store_open_path(db_path);
+        ASSERT_NOT_NULL(store);
+        ASSERT_EQ(cbm_store_upsert_project(store, candidates[i], roots[i]), CBM_STORE_OK);
+        cbm_node_t fn = {.project = candidates[i],
+                         .label = "Function",
+                         .name = symbols[i],
+                         .qualified_name = symbols[i],
+                         .file_path = "src/ambiguous.c",
+                         .start_line = 1,
+                         .end_line = 2};
+        ASSERT_GT(cbm_store_upsert_node(store, &fn), 0);
+        ASSERT_EQ(cbm_store_prepare_for_publish(store), CBM_STORE_OK);
+        cbm_store_close(store);
+    }
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    char *response = cbm_mcp_handle_tool(
+        srv, "search_graph",
+        "{\"project\":\"ambshadow1734\",\"name_pattern\":\"AmbiguousCandidate.*\"}");
+    bool rejected = response && strstr(response, "project not found") &&
+                    strstr(response, candidate_a) && strstr(response, candidate_b) &&
+                    !strstr(response, "AmbiguousCandidateOne");
+
+    free(response);
+    cbm_mcp_server_free(srv);
+    if (saved_cache_copy) {
+        cbm_setenv("CBM_CACHE_DIR", saved_cache_copy, 1);
+        free(saved_cache_copy);
+    } else {
+        cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    th_rmtree(cache);
+
+    ASSERT_TRUE(rejected);
+    PASS();
+}
+
 /* Regression for #604: path scopes architecture totals and content. */
 TEST(tool_get_architecture_path_scoping) {
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
@@ -11417,6 +11482,7 @@ SUITE(mcp) {
     RUN_TEST(tool_search_graph_accepts_project_name_alias_issue640);
     RUN_TEST(tool_project_arg_resolves_unique_tail_issue1025);
     RUN_TEST(project_resolution_does_not_prefer_empty_shadow);
+    RUN_TEST(project_resolution_rejects_ambiguous_populated_alias);
     RUN_TEST(tool_get_architecture_path_scoping);
     RUN_TEST(tool_query_graph_missing_query);
 
