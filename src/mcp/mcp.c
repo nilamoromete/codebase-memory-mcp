@@ -1555,13 +1555,13 @@ static char *resolve_project_tail(char *project) {
     return project;
 }
 
-/* Resolve the project argument, accepting the canonical "project" key plus the
+/* Read the exact project argument, accepting the canonical "project" key plus the
  * aliases a caller naturally reaches for (#640): list_projects surfaces the
  * field as "name" and the not-found hint says "pass the project name", so
  * "project_name" is the usual guess; "project_id" / "projectName" are accepted
  * too. NOT bare "name" — index_repository uses "name" for an explicit
  * project-name override. Caller must free() the result. */
-static char *get_project_arg(const char *args_json) {
+static char *get_exact_project_arg(const char *args_json) {
     char *p = cbm_mcp_get_string_arg(args_json, "project");
     if (!p) {
         p = cbm_mcp_get_string_arg(args_json, "project_name");
@@ -1572,7 +1572,14 @@ static char *get_project_arg(const char *args_json) {
     if (!p) {
         p = cbm_mcp_get_string_arg(args_json, "projectName");
     }
-    return resolve_project_tail(normalize_project_arg(p));
+    return normalize_project_arg(p);
+}
+
+/* Read-oriented handlers may accept an unambiguous folder-name tail. Destructive
+ * handlers must use get_exact_project_arg() so convenience resolution can never
+ * retarget an operation to a different database. */
+static char *get_project_arg(const char *args_json) {
+    return resolve_project_tail(get_exact_project_arg(args_json));
 }
 
 int cbm_mcp_get_int_arg(const char *args_json, const char *key, int default_val) {
@@ -4665,7 +4672,7 @@ static char *handle_index_status(cbm_mcp_server_t *srv, const char *args) {
 
 /* delete_project: just erase the .db file (and WAL/SHM). */
 static char *handle_delete_project(cbm_mcp_server_t *srv, const char *args) {
-    char *name = get_project_arg(args);
+    char *name = get_exact_project_arg(args);
     if (!name) {
         return cbm_mcp_text_result("project is required", true);
     }

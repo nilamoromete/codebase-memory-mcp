@@ -4265,6 +4265,13 @@ TEST(delete_project_does_not_remap_empty_alias_to_populated_candidate) {
     bool populated_preserved = cbm_file_exists(populated_path);
 
     free(response);
+
+    response =
+        cbm_mcp_handle_tool(srv, "delete_project", "{\"project\":\"deleteshadow1734\"}");
+    bool unresolved_alias_rejected = response && strstr(response, "not_found") != NULL;
+    bool populated_still_preserved = cbm_file_exists(populated_path);
+
+    free(response);
     cbm_mcp_server_free(srv);
     cleanup_project_db(cache, alias);
     cleanup_project_db(cache, populated_project);
@@ -4275,6 +4282,8 @@ TEST(delete_project_does_not_remap_empty_alias_to_populated_candidate) {
     ASSERT_TRUE(reported_exact_alias);
     ASSERT_TRUE(exact_alias_deleted);
     ASSERT_TRUE(populated_preserved);
+    ASSERT_TRUE(unresolved_alias_rejected);
+    ASSERT_TRUE(populated_still_preserved);
     PASS();
 }
 
