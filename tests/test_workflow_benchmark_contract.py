@@ -263,6 +263,50 @@ class RunContractTests(unittest.TestCase):
         payload = json.loads(result.stderr)
         self.assertIn("finite", payload["error"])
 
+    def test_validate_runs_accepts_manifest_bound_triplet(self) -> None:
+        records = [_run_record(arm) for arm in ("A", "B", "C")]
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_path = Path(tmp) / "manifest.json"
+            runs_path = Path(tmp) / "runs.jsonl"
+            manifest_path.write_text(json.dumps(_manifest()), encoding="utf-8")
+            runs_path.write_text(
+                "".join(json.dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
+
+            result = _run_cli(
+                "validate-runs",
+                str(runs_path),
+                "--manifest",
+                str(manifest_path),
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_validate_runs_rejects_prompt_drift_from_manifest(self) -> None:
+        records = [_run_record(arm) for arm in ("A", "B", "C")]
+        for record in records:
+            record["prompt_sha256"] = "f" * 64
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_path = Path(tmp) / "manifest.json"
+            runs_path = Path(tmp) / "runs.jsonl"
+            manifest_path.write_text(json.dumps(_manifest()), encoding="utf-8")
+            runs_path.write_text(
+                "".join(json.dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
+
+            result = _run_cli(
+                "validate-runs",
+                str(runs_path),
+                "--manifest",
+                str(manifest_path),
+            )
+
+        self.assertEqual(result.returncode, 2)
+        payload = json.loads(result.stderr)
+        self.assertIn("prompt_sha256", payload["error"])
+
     def test_validate_runs_rejects_missing_safety_metric(self) -> None:
         records = [_run_record(arm) for arm in ("A", "B", "C")]
         metrics = records[2]["metrics"]

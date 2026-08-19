@@ -150,7 +150,37 @@ def validate_manifest(path: Path) -> dict[str, Any]:
     return {"status": "valid", "suite_id": suite_id, "task_count": len(tasks)}
 
 
-def validate_runs(path: Path) -> dict[str, Any]:
+def _validate_manifest_binding(
+    grouped: dict[str, dict[str, dict[str, Any]]], manifest_path: Path
+) -> None:
+    validate_manifest(manifest_path)
+    manifest = _load_json(manifest_path)
+    tasks = manifest["tasks"]
+    tasks_by_id = {task["id"]: task for task in tasks}
+    if set(grouped) != set(tasks_by_id):
+        raise ValueError("run task_id set must exactly match manifest tasks")
+
+    model = manifest["model"]
+    for task_id, by_arm in grouped.items():
+        task = tasks_by_id[task_id]
+        expected = {
+            "suite_id": manifest["suite_id"],
+            "model": model["name"],
+            "reasoning": model["reasoning"],
+            "prompt_sha256": task["prompt_sha256"],
+            "base_commit": manifest["base_commit"],
+            "time_limit_seconds": task["time_limit_seconds"],
+            "tool_call_budget": task["tool_call_budget"],
+        }
+        for arm, record in by_arm.items():
+            for field, expected_value in expected.items():
+                if record.get(field) != expected_value:
+                    raise ValueError(
+                        f"task {task_id} arm {arm} field {field} differs from manifest"
+                    )
+
+
+def validate_runs(path: Path, manifest_path: Path | None = None) -> dict[str, Any]:
     records = _load_jsonl(path)
     grouped: dict[str, dict[str, dict[str, Any]]] = {}
     seen_run_ids: set[str] = set()
@@ -257,11 +287,15 @@ def validate_runs(path: Path) -> dict[str, Any]:
                         f"task {task_id} field {field} differs between arms A and {arm}"
                     )
 
+    if manifest_path is not None:
+        _validate_manifest_binding(grouped, manifest_path)
+
     return {
         "status": "valid",
         "record_count": len(records),
         "task_count": len(grouped),
         "arms": list(ARMS),
+        "manifest_bound": manifest_path is not None,
     }
 
 
@@ -354,8 +388,8 @@ def _paired_boolean_delta_ci(
     }
 
 
-def score_runs(path: Path) -> dict[str, Any]:
-    validation = validate_runs(path)
+def score_runs(path: Path, manifest_path: Path | None = None) -> dict[str, Any]:
+    validation = validate_runs(path, manifest_path)
     records = _load_jsonl(path)
     by_arm = {
         arm: [record for record in records if record["arm"] == arm] for arm in ARMS
@@ -434,9 +468,11 @@ def _parser() -> argparse.ArgumentParser:
     validate.add_argument("manifest", type=Path)
     validate_runs_parser = subparsers.add_parser("validate-runs")
     validate_runs_parser.add_argument("runs", type=Path)
+    validate_runs_parser.add_argument("--manifest", type=Path)
     score = subparsers.add_parser("score")
     score.add_argument("runs", type=Path)
     score.add_argument("--output", type=Path, required=True)
+    score.add_argument("--manifest", type=Path)
     return parser
 
 
@@ -446,9 +482,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "validate-manifest":
             result = validate_manifest(args.manifest)
         elif args.command == "validate-runs":
-            result = validate_runs(args.runs)
+            result = validate_runs(args.runs, args.manifest)
         elif args.command == "score":
-            result = score_runs(args.runs)
+            result = score_runs(args.runs, args.manifest)
             args.output.write_text(
                 json.dumps(result, indent=2, sort_keys=True) + "\n",
                 encoding="utf-8",
