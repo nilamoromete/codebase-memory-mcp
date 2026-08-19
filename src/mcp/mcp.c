@@ -1462,6 +1462,12 @@ static int inspect_project_db(const char *db_path, const char *project, bool *ha
     return nodes;
 }
 
+static bool project_record_is_empty_shadow(cbm_store_t *store, const char *project,
+                                           const cbm_project_t *record) {
+    return (!record->root_path || record->root_path[0] == 0) &&
+           cbm_store_count_nodes(store, project) <= 0;
+}
+
 /* #1025: agents naturally pass the repo FOLDER name ("codebase-memory-mcp"),
  * but indexed project names derive from the full path
  * (E:\project\graph\x -> "E-project-graph-x"), so the exact lookup fails
@@ -2279,11 +2285,16 @@ static cbm_store_t *resolve_store_internal(cbm_mcp_server_t *srv, const char *pr
          * store without closing it leaks the SQLite connection. */
         cbm_project_t proj_verify = {0};
         if (cbm_store_get_project(srv->store, project, &proj_verify) == CBM_STORE_OK) {
+            bool empty_shadow =
+                project_record_is_empty_shadow(srv->store, project, &proj_verify);
             cbm_project_free_fields(&proj_verify);
-            srv->owns_store = true;
-            free(srv->current_project);
-            srv->current_project = heap_strdup(project);
-            return srv->store; /* fast path: filename == internal name */
+            if (!empty_shadow) {
+                srv->owns_store = true;
+                free(srv->current_project);
+                srv->current_project = heap_strdup(project);
+                return srv->store; /* fast path: filename == internal name */
+            }
+            cbm_log_warn("mcp.project_empty_shadow_rejected", "project", project);
         }
         /* #704: <project>.db exists but its INTERNAL project name differs from
          * the passed name (a copied/renamed db, or a legacy '.'-vs-'-' username
@@ -2554,8 +2565,17 @@ static cbm_store_t *resolve_store_fallback_scan(const char *project) {
         cbm_store_t *st = NULL;
         if (db_internal_project_name(full_path, iname, sizeof(iname), &st)) {
             if (strcmp(iname, project) == 0) {
-                found = st; /* adopt — caller takes ownership */
-                break;
+                cbm_project_t stored = {0};
+                bool valid = cbm_store_get_project(st, iname, &stored) == CBM_STORE_OK;
+                bool empty_shadow =
+                    valid && project_record_is_empty_shadow(st, iname, &stored);
+                if (valid) {
+                    cbm_project_free_fields(&stored);
+                }
+                if (valid && !empty_shadow) {
+                    found = st; /* adopt — caller takes ownership */
+                    break;
+                }
             }
             cbm_store_close(st);
         }
