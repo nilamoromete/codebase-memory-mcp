@@ -43,6 +43,7 @@ enum {
 #define SLEN(s) (sizeof(s) - 1)
 #include "mcp/mcp.h"
 #include "mcp/mcp_internal.h"
+#include "mcp/workflow_evidence.h"
 #include "store/store.h"
 #include <sqlite3.h>
 #include "cypher/cypher.h"
@@ -4292,8 +4293,6 @@ enum {
     COVERAGE_RANGE_MAX = 128,
 };
 
-bool cbm_path_within_root(const char *root_path, const char *abs_path); /* defined below */
-
 typedef enum {
     COVERAGE_PATH_OK = 0,
     COVERAGE_PATH_OUTSIDE,
@@ -4353,52 +4352,6 @@ static coverage_path_result_t coverage_normalize_rel(const char *input, bool all
     }
     out[written] = '\0';
     return written > 0U || allow_root ? COVERAGE_PATH_OK : COVERAGE_PATH_INVALID;
-}
-
-static int64_t coverage_stat_mtime_ns(const struct stat *st) {
-#ifdef __APPLE__
-    return ((int64_t)st->st_mtimespec.tv_sec * (int64_t)CBM_NSEC_PER_SEC) +
-           (int64_t)st->st_mtimespec.tv_nsec;
-#elif defined(_WIN32)
-    return (int64_t)st->st_mtime * (int64_t)CBM_NSEC_PER_SEC;
-#else
-    return ((int64_t)st->st_mtim.tv_sec * (int64_t)CBM_NSEC_PER_SEC) + (int64_t)st->st_mtim.tv_nsec;
-#endif
-}
-
-static const char *coverage_path_freshness(cbm_store_t *store, const char *project,
-                                           const char *root_path, const char *rel_path,
-                                           bool *outside) {
-    *outside = false;
-    if (!root_path || !root_path[0]) {
-        return "unavailable";
-    }
-    char abs_path[CBM_SZ_4K];
-    int n = snprintf(abs_path, sizeof(abs_path), "%s%s%s", root_path,
-                     root_path[strlen(root_path) - 1U] == '/' ? "" : "/", rel_path);
-    if (n < 0 || (size_t)n >= sizeof(abs_path)) {
-        return "unavailable";
-    }
-    struct stat st;
-    if (stat(abs_path, &st) != 0) {
-        return "missing";
-    }
-    if (!cbm_path_within_root(root_path, abs_path)) {
-        *outside = true;
-        return "outside_project";
-    }
-
-    cbm_file_hash_t hash = {0};
-    int rc = cbm_store_get_file_hash(store, project, rel_path, &hash);
-    if (rc == CBM_STORE_NOT_FOUND) {
-        return "not_tracked";
-    }
-    if (rc != CBM_STORE_OK) {
-        return "unavailable";
-    }
-    bool matches = hash.mtime_ns == coverage_stat_mtime_ns(&st) && hash.size == st.st_size;
-    cbm_store_clear_file_hash(&hash);
-    return matches ? "metadata_match" : "metadata_changed";
 }
 
 static void coverage_add_ranges(yyjson_mut_doc *doc, yyjson_mut_val *row, const char *detail) {
@@ -4465,46 +4418,6 @@ static void coverage_add_row_json(yyjson_mut_doc *doc, yyjson_mut_val *array,
     yyjson_mut_arr_add_val(array, item);
 }
 
-static const char *coverage_status(const cbm_coverage_row_t *rows, int count,
-                                   const char *requested_path, const char *recording_status,
-                                   bool generation_matches, bool lookup_ok,
-                                   bool exact_path_verified) {
-    if (!lookup_ok) {
-        return "coverage_unavailable";
-    }
-    bool exact = false;
-    for (int i = 0; i < count; i++) {
-        if (rows[i].rel_path && strcmp(rows[i].rel_path, requested_path) == 0) {
-            exact = true;
-            break;
-        }
-    }
-    for (int pass = 0; pass < 3; pass++) {
-        for (int i = 0; i < count; i++) {
-            if (exact && (!rows[i].rel_path || strcmp(rows[i].rel_path, requested_path) != 0)) {
-                continue;
-            }
-            const char *kind = rows[i].kind ? rows[i].kind : "";
-            if (pass == 0 && strcmp(kind, "parse_partial") == 0) {
-                return "partial";
-            }
-            if (pass == 1 && strncmp(kind, "not_indexed", 11) == 0) {
-                return "excluded";
-            }
-            if (pass == 2 && kind[0]) {
-                return "skipped";
-            }
-        }
-    }
-    bool recording_complete = recording_status && strcmp(recording_status, "complete") == 0;
-    bool truncated_exact_path_verified =
-        exact_path_verified && recording_status && strcmp(recording_status, "truncated") == 0;
-    if (!generation_matches || (!recording_complete && !truncated_exact_path_verified)) {
-        return "coverage_unavailable";
-    }
-    return "no_recorded_issue";
-}
-
 static const char *coverage_recommended_action(const char *status, const char *freshness) {
     if (!freshness || strcmp(freshness, "metadata_match") != 0) {
         return "read_source_and_reindex";
@@ -4546,14 +4459,13 @@ static char *handle_check_index_coverage(cbm_mcp_server_t *srv, const char *args
             "paths or scopes is required (arrays; max 128 paths and 32 scopes)", true);
     }
 
-    cbm_project_t proj = {0};
-    bool have_project = cbm_store_get_project(store, project, &proj) == CBM_STORE_OK;
-    cbm_coverage_meta_t meta = {0};
-    bool have_meta = cbm_store_coverage_meta_get(store, project, &meta) == CBM_STORE_OK;
-    bool generation_matches = have_project && have_meta && proj.indexed_at && meta.generation &&
-                              strcmp(proj.indexed_at, meta.generation) == 0;
-    const char *recording_status =
-        have_meta && meta.recording_status ? meta.recording_status : "unknown";
+    cbm_workflow_evidence_gate_t gate;
+    if (cbm_workflow_evidence_gate_begin(store, project, &gate) != CBM_STORE_OK) {
+        yyjson_doc_free(adoc);
+        free(project);
+        return cbm_mcp_text_result("coverage evidence snapshot unavailable", true);
+    }
+    const char *recording_status = cbm_workflow_evidence_recording_status(&gate);
     if (srv->evidence_snapshot_test_hook) {
         srv->evidence_snapshot_test_hook(srv->evidence_snapshot_test_context);
     }
@@ -4564,25 +4476,33 @@ static char *handle_check_index_coverage(cbm_mcp_server_t *srv, const char *args
     yyjson_mut_obj_add_strcpy(doc, root, "project", project);
     yyjson_mut_obj_add_str(doc, root, "signal", "best_effort");
     yyjson_mut_obj_add_strcpy(doc, root, "indexed_at",
-                              have_project && proj.indexed_at ? proj.indexed_at : "");
+                              gate.have_project && gate.project_record.indexed_at
+                                  ? gate.project_record.indexed_at
+                                  : "");
 
     yyjson_mut_val *meta_obj = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_strcpy(doc, meta_obj, "generation",
-                              have_meta && meta.generation ? meta.generation : "");
+                              gate.have_coverage_meta && gate.coverage_meta.generation
+                                  ? gate.coverage_meta.generation
+                                  : "");
     yyjson_mut_obj_add_strcpy(doc, meta_obj, "index_mode",
-                              have_meta && meta.index_mode ? meta.index_mode : "unknown");
+                              gate.have_coverage_meta && gate.coverage_meta.index_mode
+                                  ? gate.coverage_meta.index_mode
+                                  : "unknown");
     yyjson_mut_obj_add_strcpy(doc, meta_obj, "recorded_at",
-                              have_meta && meta.recorded_at ? meta.recorded_at : "");
+                              gate.have_coverage_meta && gate.coverage_meta.recorded_at
+                                  ? gate.coverage_meta.recorded_at
+                                  : "");
     yyjson_mut_obj_add_strcpy(doc, meta_obj, "recording_status", recording_status);
     yyjson_mut_obj_add_int(doc, meta_obj, "ignored_files_stored",
-                           have_meta ? meta.ignored_files_stored : 0);
+                           gate.have_coverage_meta ? gate.coverage_meta.ignored_files_stored : 0);
     yyjson_mut_obj_add_int(doc, meta_obj, "ignored_files_total",
-                           have_meta ? meta.ignored_files_total : 0);
+                           gate.have_coverage_meta ? gate.coverage_meta.ignored_files_total : 0);
     yyjson_mut_obj_add_bool(doc, meta_obj, "hash_records_complete",
-                            have_meta && meta.hash_records_complete);
+                            gate.have_coverage_meta && gate.coverage_meta.hash_records_complete);
     yyjson_mut_obj_add_int(doc, meta_obj, "coverage_version",
-                           have_meta ? meta.coverage_version : 0);
-    yyjson_mut_obj_add_bool(doc, meta_obj, "generation_matches", generation_matches);
+                           gate.have_coverage_meta ? gate.coverage_meta.coverage_version : 0);
+    yyjson_mut_obj_add_bool(doc, meta_obj, "generation_matches", gate.generation_matches);
     yyjson_mut_obj_add_val(doc, root, "metadata", meta_obj);
 
     yyjson_mut_val *path_results = yyjson_mut_arr(doc);
@@ -4608,33 +4528,29 @@ static char *handle_check_index_coverage(cbm_mcp_server_t *srv, const char *args
                 continue;
             }
             yyjson_mut_obj_add_strcpy(doc, item, "path", rel);
-            cbm_coverage_row_t *rows = NULL;
-            int row_count = 0;
-            int cov_rc = cbm_store_coverage_get_path(store, project, rel, &rows, &row_count);
-            bool lookup_ok = cov_rc == CBM_STORE_OK || cov_rc == CBM_STORE_NOT_FOUND;
-            if (!lookup_ok) {
-                row_count = 0;
+            cbm_workflow_path_evidence_t evidence = {0};
+            int evidence_rc =
+                cbm_workflow_evidence_gate_check_path(&gate, rel, &evidence);
+            if (evidence_rc != CBM_STORE_OK || !evidence.coverage_lookup_ok) {
                 yyjson_mut_obj_add_str(doc, item, "coverage_lookup", "error");
             }
-            bool outside = false;
-            const char *freshness = coverage_path_freshness(
-                store, project, have_project ? proj.root_path : NULL, rel, &outside);
-            bool exact_path_verified =
-                have_meta && meta.hash_records_complete && strcmp(freshness, "metadata_match") == 0;
-            const char *status =
-                outside ? "outside_project"
-                        : coverage_status(rows, row_count, rel, recording_status,
-                                          generation_matches, lookup_ok, exact_path_verified);
+            const char *status = evidence_rc == CBM_STORE_OK && evidence.status
+                                     ? evidence.status
+                                     : "coverage_unavailable";
+            const char *freshness =
+                evidence_rc == CBM_STORE_OK && evidence.freshness_detail
+                    ? evidence.freshness_detail
+                    : "unavailable";
             yyjson_mut_obj_add_strcpy(doc, item, "status", status);
             yyjson_mut_obj_add_strcpy(doc, item, "freshness", freshness);
             yyjson_mut_obj_add_strcpy(doc, item, "recommended_action",
                                       coverage_recommended_action(status, freshness));
             yyjson_mut_val *coverage = yyjson_mut_arr(doc);
-            for (int i = 0; i < row_count; i++) {
-                coverage_add_row_json(doc, coverage, &rows[i], rel);
+            for (int i = 0; i < evidence.row_count; i++) {
+                coverage_add_row_json(doc, coverage, &evidence.rows[i], rel);
             }
             yyjson_mut_obj_add_val(doc, item, "coverage", coverage);
-            cbm_store_free_coverage(rows, row_count);
+            cbm_workflow_evidence_path_clear(&evidence);
             yyjson_mut_arr_add_val(path_results, item);
         }
     }
@@ -4687,11 +4603,12 @@ static char *handle_check_index_coverage(cbm_mcp_server_t *srv, const char *args
                 coverage_add_row_json(doc, entries, &rows[i], NULL);
             }
             yyjson_mut_obj_add_val(doc, item, "entries", entries);
-            const char *scope_status = !lookup_ok || !generation_matches ? "coverage_unavailable"
-                                       : row_count > 0                   ? "known_gaps"
-                                       : strcmp(recording_status, "complete") == 0
-                                           ? "no_recorded_issue"
-                                           : "coverage_unavailable";
+            const char *scope_status =
+                !lookup_ok || !gate.generation_matches ? "coverage_unavailable"
+                : row_count > 0                        ? "known_gaps"
+                : strcmp(recording_status, "complete") == 0
+                    ? "no_recorded_issue"
+                    : "coverage_unavailable";
             yyjson_mut_obj_add_str(doc, item, "status", scope_status);
             cbm_store_free_coverage(rows, row_count);
             yyjson_mut_arr_add_val(scope_results, item);
@@ -4706,15 +4623,12 @@ static char *handle_check_index_coverage(cbm_mcp_server_t *srv, const char *args
     char *json = yy_doc_to_str(doc);
     yyjson_mut_doc_free(doc);
     yyjson_doc_free(adoc);
-    if (have_meta) {
-        cbm_store_coverage_meta_clear(&meta);
-    }
-    if (have_project) {
-        safe_str_free(&proj.name);
-        safe_str_free(&proj.indexed_at);
-        safe_str_free(&proj.root_path);
-    }
+    int gate_end_rc = cbm_workflow_evidence_gate_end(&gate);
     free(project);
+    if (gate_end_rc != CBM_STORE_OK) {
+        free(json);
+        return cbm_mcp_text_result("coverage evidence snapshot could not be closed", true);
+    }
     char *result = cbm_mcp_text_result(json, false);
     free(json);
     return result;
