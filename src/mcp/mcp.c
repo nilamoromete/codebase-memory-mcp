@@ -1992,10 +1992,11 @@ static const char *project_db_path(const char *project, char *buf, size_t bufsz)
  * and corrupt dbs (0-byte file, missing `projects` table, or >1 primary row).
  * On success
  * the internal name is copied into name_out; if out_store is non-NULL the open
- * handle is transferred to the caller (who must cbm_store_close it). On failure
- * the store is always closed. Defined after is_project_db_file below. */
+ * handle is transferred to the caller (who must cbm_store_close it). When
+ * pin_read_snapshot is true that handle also owns the active read transaction.
+ * On failure the store is always closed. Defined after is_project_db_file. */
 static bool db_internal_project_name(const char *full_path, char *name_out, size_t name_sz,
-                                     cbm_store_t **out_store);
+                                     bool pin_read_snapshot, cbm_store_t **out_store);
 static bool db_live_project_name(const char *full_path, char *name_out, size_t name_sz,
                                  cbm_store_t **out_store);
 
@@ -2537,13 +2538,17 @@ static bool is_project_db_file(const char *name, size_t len) {
 
 /* db_internal_project_name — see forward declaration above resolve_store. */
 static bool db_internal_project_name(const char *full_path, char *name_out, size_t name_sz,
-                                     cbm_store_t **out_store) {
+                                     bool pin_read_snapshot, cbm_store_t **out_store) {
     if (out_store) {
         *out_store = NULL;
     }
     cbm_store_t *st = cbm_store_open_path_query(full_path);
     if (!st) {
         return false; /* nonexistent / unreadable */
+    }
+    if (pin_read_snapshot && cbm_store_exec(st, "BEGIN;") != CBM_STORE_OK) {
+        cbm_store_close(st);
+        return false;
     }
     cbm_project_t *projs = NULL;
     int n = 0;
@@ -2579,19 +2584,26 @@ static bool db_internal_project_name(const char *full_path, char *name_out, size
  * the same empty-shadow rule used by resolve_store_internal(). A zero-node
  * project with a real root remains live; only rootless zero-node rows are
  * treated as shadows. */
-static bool db_live_project_name(const char *full_path, char *name_out, size_t name_sz,
-                                 cbm_store_t **out_store) {
+static bool db_live_project_metadata(const char *full_path, char *name_out, size_t name_sz,
+                                     char *root_out, size_t root_sz, bool pin_read_snapshot,
+                                     cbm_store_t **out_store) {
     if (out_store) {
         *out_store = NULL;
     }
+    if (root_out && root_sz > 0) {
+        root_out[0] = 0;
+    }
     cbm_store_t *store = NULL;
-    if (!db_internal_project_name(full_path, name_out, name_sz, &store)) {
+    if (!db_internal_project_name(full_path, name_out, name_sz, pin_read_snapshot, &store)) {
         return false;
     }
 
     cbm_project_t project = {0};
     bool valid = cbm_store_get_project(store, name_out, &project) == CBM_STORE_OK;
     bool live = valid && !project_record_is_empty_shadow(store, name_out, &project);
+    if (live && root_out && root_sz > 0 && project.root_path) {
+        snprintf(root_out, root_sz, "%s", project.root_path);
+    }
     if (valid) {
         cbm_project_free_fields(&project);
     }
@@ -2601,6 +2613,11 @@ static bool db_live_project_name(const char *full_path, char *name_out, size_t n
         cbm_store_close(store);
     }
     return live;
+}
+
+static bool db_live_project_name(const char *full_path, char *name_out, size_t name_sz,
+                                 cbm_store_t **out_store) {
+    return db_live_project_metadata(full_path, name_out, name_sz, NULL, 0, false, out_store);
 }
 
 /* resolve_store_fallback_scan — see forward declaration above resolve_store. */
@@ -2649,70 +2666,78 @@ static cbm_store_t *resolve_store_fallback_scan(const char *project) {
     return found;
 }
 
-/* Open a .db file briefly, collect node/edge counts and root_path,
- * then append a JSON entry to arr. */
-static void build_project_json_entry(yyjson_mut_doc *doc, yyjson_mut_val *arr, const char *dir_path,
-                                     const char *name, size_t name_len, int64_t size_bytes,
-                                     bool include_details) {
-    (void)name_len;
+typedef struct {
+    char *db_name;
+    char project_name[CBM_SZ_1K];
+    char root_path[CBM_SZ_1K];
+    int nodes;
+    int edges;
+    int64_t size_bytes;
+} project_list_snapshot_t;
 
+/* Open one database once and retain every value list_projects will serialize.
+ * Returning false excludes unreadable, corrupt, or empty-shadow databases. */
+static bool collect_project_list_snapshot(const char *dir_path, const char *db_name,
+                                          bool include_details, project_list_snapshot_t *snapshot) {
+    memset(snapshot, 0, sizeof(*snapshot));
     char full_path[CBM_SZ_2K];
-    snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, name);
+    snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, db_name);
+    snapshot->size_bytes = cbm_file_size(full_path);
+    if (snapshot->size_bytes < 0) {
+        return false;
+    }
 
     /* #704: key on the db's INTERNAL project name, not its filename. Node/edge
      * rows are tagged with the internal name, so a drifted filename (copied or
      * renamed db, legacy '.'-vs-'-' username twin) would otherwise report 0
      * nodes/edges and be unresolvable. Skip ghost/empty/corrupt dbs entirely so
      * they don't appear as resolvable projects. */
-    char project_name[CBM_SZ_1K];
     cbm_store_t *pstore = NULL;
-    if (!db_live_project_name(full_path, project_name, sizeof(project_name), &pstore)) {
-        return; /* ghost / unreadable — not a resolvable project */
+    if (!db_live_project_metadata(full_path, snapshot->project_name, sizeof(snapshot->project_name),
+                                  snapshot->root_path, sizeof(snapshot->root_path), true,
+                                  &pstore)) {
+        return false;
     }
 
-    int nodes = 0;
-    int edges = 0;
     if (include_details) {
-        nodes = cbm_store_count_nodes(pstore, project_name);
-        edges = cbm_store_count_edges(pstore, project_name);
-    }
-    char root_path_buf[CBM_SZ_1K] = "";
-    cbm_project_t proj = {0};
-    if (cbm_store_get_project(pstore, project_name, &proj) == CBM_STORE_OK) {
-        if (proj.root_path) {
-            snprintf(root_path_buf, sizeof(root_path_buf), "%s", proj.root_path);
-        }
-        cbm_project_free_fields(&proj);
+        snapshot->nodes = cbm_store_count_nodes(pstore, snapshot->project_name);
+        snapshot->edges = cbm_store_count_edges(pstore, snapshot->project_name);
     }
     cbm_store_close(pstore);
+    return true;
+}
 
+/* Serialize a previously validated snapshot without reopening its database. */
+static void build_project_json_entry(yyjson_mut_doc *doc, yyjson_mut_val *arr,
+                                     const project_list_snapshot_t *snapshot,
+                                     bool include_details) {
     yyjson_mut_val *p = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_strcpy(doc, p, "name", project_name);
-    yyjson_mut_obj_add_strcpy(doc, p, "root_path", root_path_buf);
+    yyjson_mut_obj_add_strcpy(doc, p, "name", snapshot->project_name);
+    yyjson_mut_obj_add_strcpy(doc, p, "root_path", snapshot->root_path);
     /* Listing stays lean: only the branch (the one git fact that
      * disambiguates same-repo projects). The 12-field git block — mostly
      * null for non-git roots — cost ~10KB across a full cache and is one
      * index_status call away for the project you actually care about. */
-    if (include_details && root_path_buf[0]) {
+    if (include_details && snapshot->root_path[0]) {
         cbm_git_context_t gctx = {0};
-        (void)cbm_git_context_resolve(root_path_buf, &gctx);
+        (void)cbm_git_context_resolve(snapshot->root_path, &gctx);
         if (gctx.is_git && gctx.branch) {
             yyjson_mut_obj_add_strcpy(doc, p, "branch", gctx.branch);
         }
         cbm_git_context_free(&gctx);
     }
     if (include_details) {
-        yyjson_mut_obj_add_int(doc, p, "nodes", nodes);
-        yyjson_mut_obj_add_int(doc, p, "edges", edges);
-        yyjson_mut_obj_add_int(doc, p, "size_bytes", size_bytes);
+        yyjson_mut_obj_add_int(doc, p, "nodes", snapshot->nodes);
+        yyjson_mut_obj_add_int(doc, p, "edges", snapshot->edges);
+        yyjson_mut_obj_add_int(doc, p, "size_bytes", snapshot->size_bytes);
     }
     yyjson_mut_arr_add_val(arr, p);
 }
 
-static int project_db_name_cmp(const void *a, const void *b) {
-    const char *const *sa = (const char *const *)a;
-    const char *const *sb = (const char *const *)b;
-    return strcmp(*sa, *sb);
+static int project_snapshot_name_cmp(const void *a, const void *b) {
+    const project_list_snapshot_t *sa = (const project_list_snapshot_t *)a;
+    const project_list_snapshot_t *sb = (const project_list_snapshot_t *)b;
+    return strcmp(sa->db_name, sb->db_name);
 }
 
 /* list_projects: scan cache directory for .db files.
@@ -2760,7 +2785,7 @@ static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
         return cbm_mcp_text_result(msg, true);
     }
 
-    char **db_names = NULL;
+    project_list_snapshot_t *db_snapshots = NULL;
     size_t db_count = 0;
     size_t db_cap = 0;
     bool name_collection_failed = false;
@@ -2771,36 +2796,35 @@ static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
         if (!is_project_db_file(name, len)) {
             continue;
         }
-        char full_path[CBM_SZ_2K];
-        snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, name);
-        char live_name[CBM_SZ_1K];
-        if (!db_live_project_name(full_path, live_name, sizeof(live_name), NULL)) {
+        project_list_snapshot_t snapshot;
+        if (!collect_project_list_snapshot(dir_path, name, include_details, &snapshot)) {
             continue;
         }
         if (db_count == db_cap) {
             size_t next_cap = db_cap ? db_cap * 2 : 64;
-            char **grown = realloc(db_names, next_cap * sizeof(*db_names));
+            project_list_snapshot_t *grown =
+                realloc(db_snapshots, next_cap * sizeof(*db_snapshots));
             if (!grown) {
                 name_collection_failed = true;
                 break;
             }
-            db_names = grown;
+            db_snapshots = grown;
             db_cap = next_cap;
         }
-        db_names[db_count] = heap_strdup(name);
-        if (!db_names[db_count]) {
+        snapshot.db_name = heap_strdup(name);
+        if (!snapshot.db_name) {
             name_collection_failed = true;
             break;
         }
-        db_count++;
+        db_snapshots[db_count++] = snapshot;
     }
     cbm_closedir(d);
 
     if (name_collection_failed) {
         for (size_t i = 0; i < db_count; i++) {
-            free(db_names[i]);
+            free(db_snapshots[i].db_name);
         }
-        free(db_names);
+        free(db_snapshots);
         yyjson_mut_doc_free(doc);
         return cbm_mcp_text_result(
             "{\"error\":\"out of memory while collecting indexed projects\"}", true);
@@ -2813,7 +2837,7 @@ static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
     }
 
     if (db_count > 1) {
-        qsort(db_names, db_count, sizeof(*db_names), project_db_name_cmp);
+        qsort(db_snapshots, db_count, sizeof(*db_snapshots), project_snapshot_name_cmp);
     }
     size_t start = (size_t)offset < db_count ? (size_t)offset : db_count;
     size_t end = start + (size_t)limit;
@@ -2821,20 +2845,12 @@ static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
         end = db_count;
     }
     for (size_t i = start; i < end; i++) {
-        const char *name = db_names[i];
-        size_t len = strlen(name);
-        char full_path[CBM_SZ_2K];
-        snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, name);
-        int64_t size_bytes = cbm_file_size(full_path);
-        if (size_bytes < 0) {
-            continue;
-        }
-        build_project_json_entry(doc, arr, dir_path, name, len, size_bytes, include_details);
+        build_project_json_entry(doc, arr, &db_snapshots[i], include_details);
     }
     for (size_t i = 0; i < db_count; i++) {
-        free(db_names[i]);
+        free(db_snapshots[i].db_name);
     }
-    free(db_names);
+    free(db_snapshots);
 
     yyjson_mut_obj_add_val(doc, root, "projects", arr);
     yyjson_mut_obj_add_uint(doc, root, "total", db_count);
