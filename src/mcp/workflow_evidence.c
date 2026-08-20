@@ -38,7 +38,7 @@ static bool workflow_rel_path_is_normalized(const char *path) {
     const char *component = path;
     for (const char *p = path;; p++) {
         unsigned char c = (unsigned char)*p;
-        if (c == '\\' || c < 0x20U || c == 0x7fU) {
+        if (c == '\\' || (c != 0 && (c < 0x20U || c == 0x7fU))) {
             return false;
         }
         if (c != '/' && c != 0) {
