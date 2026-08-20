@@ -4244,13 +4244,12 @@ TEST(project_resolution_rejects_cached_empty_embedded_store) {
     ASSERT_EQ(cbm_store_upsert_project(store, project, ""), CBM_STORE_OK);
     cbm_mcp_server_set_project(srv, project);
 
-    char *response =
-        cbm_mcp_handle_tool(srv, "index_status", "{\"project\":\"cached-empty1734\"}");
+    char *response = cbm_mcp_handle_tool(srv, "index_status", "{\"project\":\"cached-empty1734\"}");
     ASSERT_NOT_NULL(response);
     char *inner = extract_text_content(response);
     ASSERT_NOT_NULL(inner);
-    bool rejected = strstr(inner, "project not found") != NULL &&
-                    strstr(inner, "\"status\":\"empty\"") == NULL;
+    bool rejected =
+        strstr(inner, "project not found") != NULL && strstr(inner, "\"status\":\"empty\"") == NULL;
 
     free(inner);
     free(response);
@@ -4266,14 +4265,12 @@ TEST(project_resolution_rejects_cached_empty_embedded_store) {
     ASSERT_EQ(cbm_store_upsert_project(store, project, "/workspace/cached-empty1734"),
               CBM_STORE_OK);
     cbm_mcp_server_set_project(srv, project);
-    response =
-        cbm_mcp_handle_tool(srv, "index_status", "{\"project\":\"cached-empty1734\"}");
+    response = cbm_mcp_handle_tool(srv, "index_status", "{\"project\":\"cached-empty1734\"}");
     ASSERT_NOT_NULL(response);
     inner = extract_text_content(response);
     ASSERT_NOT_NULL(inner);
     bool rooted_zero_node_remains_live =
-        strstr(inner, "\"status\":\"empty\"") != NULL &&
-        strstr(inner, "project not found") == NULL;
+        strstr(inner, "\"status\":\"empty\"") != NULL && strstr(inner, "project not found") == NULL;
 
     free(inner);
     free(response);
@@ -4307,8 +4304,7 @@ TEST(delete_project_does_not_remap_empty_alias_to_populated_candidate) {
 
     cbm_store_t *populated = cbm_store_open_path(populated_path);
     ASSERT_NOT_NULL(populated);
-    ASSERT_EQ(cbm_store_upsert_project(populated, populated_project,
-                                       "/workspace/deleteshadow1734"),
+    ASSERT_EQ(cbm_store_upsert_project(populated, populated_project, "/workspace/deleteshadow1734"),
               CBM_STORE_OK);
     cbm_node_t fn = {.project = populated_project,
                      .label = "Function",
@@ -4325,15 +4321,14 @@ TEST(delete_project_does_not_remap_empty_alias_to_populated_candidate) {
     ASSERT_NOT_NULL(srv);
     char *response =
         cbm_mcp_handle_tool(srv, "delete_project", "{\"project\":\"deleteshadow1734\"}");
-    bool reported_exact_alias = response && strstr(response, alias) != NULL &&
-                                strstr(response, populated_project) == NULL;
+    bool reported_exact_alias =
+        response && strstr(response, alias) != NULL && strstr(response, populated_project) == NULL;
     bool exact_alias_deleted = !cbm_file_exists(alias_path);
     bool populated_preserved = cbm_file_exists(populated_path);
 
     free(response);
 
-    response =
-        cbm_mcp_handle_tool(srv, "delete_project", "{\"project\":\"deleteshadow1734\"}");
+    response = cbm_mcp_handle_tool(srv, "delete_project", "{\"project\":\"deleteshadow1734\"}");
     bool unresolved_alias_rejected = response && strstr(response, "not_found") != NULL;
     bool populated_still_preserved = cbm_file_exists(populated_path);
 
@@ -4374,13 +4369,12 @@ TEST(list_projects_hides_empty_shadow_before_pagination) {
     ASSERT_TRUE(mcp_make_valid_project_store_at(db_path, shadow, ""));
 
     snprintf(db_path, sizeof(db_path), "%s/%s.db", cache, live_project);
-    ASSERT_TRUE(mcp_make_valid_project_store_at(db_path, live_project,
-                                                "/workspace/live-list1734"));
+    ASSERT_TRUE(mcp_make_valid_project_store_at(db_path, live_project, "/workspace/live-list1734"));
 
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
     ASSERT_NOT_NULL(srv);
-    char *response = cbm_mcp_handle_tool(
-        srv, "list_projects", "{\"offset\":0,\"limit\":1,\"include_details\":true}");
+    char *response = cbm_mcp_handle_tool(srv, "list_projects",
+                                         "{\"offset\":0,\"limit\":1,\"include_details\":true}");
     bool shadow_hidden = response && strstr(response, shadow) == NULL;
     bool live_listed = response && strstr(response, live_project) != NULL;
     bool pagination_accurate = response && strstr(response, "\\\"total\\\":1") &&
@@ -4418,15 +4412,15 @@ TEST(list_projects_serializes_one_collection_snapshot) {
     static const char project[] = "stable-list-snapshot1734";
     char db_path[CBM_SZ_512];
     snprintf(db_path, sizeof(db_path), "%s/%s.db", cache, project);
-    ASSERT_TRUE(mcp_make_valid_project_store_at(db_path, project,
-                                                "/workspace/stable-list-snapshot1734"));
+    ASSERT_TRUE(
+        mcp_make_valid_project_store_at(db_path, project, "/workspace/stable-list-snapshot1734"));
 
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
     ASSERT_NOT_NULL(srv);
     mcp_list_collection_hook_probe_t probe = {.db_path = db_path};
     cbm_mcp_server_set_list_collection_test_hook(srv, mcp_list_collection_hook_probe, &probe);
-    char *response = cbm_mcp_handle_tool(
-        srv, "list_projects", "{\"offset\":0,\"limit\":1,\"include_details\":true}");
+    char *response = cbm_mcp_handle_tool(srv, "list_projects",
+                                         "{\"offset\":0,\"limit\":1,\"include_details\":true}");
 
     bool hook_ran = probe.calls == 1 && probe.removed;
     bool stable_entry = response && strstr(response, project) != NULL &&
@@ -9393,10 +9387,8 @@ TEST(tool_resolve_store_rejects_duplicate_internal_names) {
     cbm_setenv("CBM_CACHE_DIR", cache, 1);
 
     static const char internal[] = "duplicate-internal1734";
-    ASSERT_TRUE(
-        issue704_make_db(cache, "copy-one1734.db", internal, "DuplicateInternalOne"));
-    ASSERT_TRUE(
-        issue704_make_db(cache, "copy-two1734.db", internal, "DuplicateInternalTwo"));
+    ASSERT_TRUE(issue704_make_db(cache, "copy-one1734.db", internal, "DuplicateInternalOne"));
+    ASSERT_TRUE(issue704_make_db(cache, "copy-two1734.db", internal, "DuplicateInternalTwo"));
 
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
     ASSERT_NOT_NULL(srv);

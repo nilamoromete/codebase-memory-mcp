@@ -2318,8 +2318,7 @@ static cbm_store_t *resolve_store_internal(cbm_mcp_server_t *srv, const char *pr
          * store without closing it leaks the SQLite connection. */
         cbm_project_t proj_verify = {0};
         if (cbm_store_get_project(srv->store, project, &proj_verify) == CBM_STORE_OK) {
-            bool empty_shadow =
-                project_record_is_empty_shadow(srv->store, project, &proj_verify);
+            bool empty_shadow = project_record_is_empty_shadow(srv->store, project, &proj_verify);
             cbm_project_free_fields(&proj_verify);
             if (!empty_shadow) {
                 srv->owns_store = true;
