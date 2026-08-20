@@ -16,13 +16,19 @@ from typing import Any
 
 
 ARMS = ("A", "B", "C")
+PROMOTION_TASK_MIN = 30
+PROMOTION_TASK_MAX = 50
 COMPARABILITY_FIELDS = (
     "suite_id",
     "task_id",
     "model",
     "reasoning",
     "hardware",
+    "language",
+    "category",
     "risk_class",
+    "blast_radius",
+    "path_class",
     "prompt_sha256",
     "base_commit",
     "time_limit_seconds",
@@ -87,10 +93,34 @@ def _require_hex_digest(value: Any, length: int, field: str) -> None:
         raise ValueError(f"{field} must be {length} lowercase hex characters")
 
 
+def _validate_repo_relative_paths(
+    task: dict[str, Any], index: int, field: str, *, required: bool
+) -> None:
+    values = task.get(field)
+    if values is None and not required:
+        return
+    if not isinstance(values, list) or (required and not values):
+        suffix = "non-empty " if required else ""
+        raise ValueError(f"tasks[{index}].{field} must be a {suffix}array")
+    for value in values:
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"tasks[{index}].{field} must contain non-empty strings")
+        normalized = PurePosixPath(value.replace("\\", "/"))
+        if (
+            PureWindowsPath(value).is_absolute()
+            or normalized.is_absolute()
+            or ".." in normalized.parts
+        ):
+            raise ValueError(f"tasks[{index}].{field} must be repository-relative")
+
+
 def validate_manifest(path: Path) -> dict[str, Any]:
     manifest = _load_json(path)
     if manifest.get("schema_version") != 1:
         raise ValueError("schema_version must be 1")
+    manifest_state = manifest.get("manifest_state")
+    if manifest_state not in ("template", "frozen"):
+        raise ValueError("manifest_state must be template or frozen")
     if manifest.get("arms") != list(ARMS):
         raise ValueError(f"arms must be exactly {list(ARMS)}")
     model = manifest.get("model")
@@ -100,6 +130,14 @@ def validate_manifest(path: Path) -> dict[str, Any]:
     _require_non_empty_string(model.get("reasoning"), "model.reasoning")
     _require_non_empty_string(manifest.get("hardware"), "hardware")
     _require_hex_digest(manifest.get("base_commit"), 40, "base_commit")
+    if manifest_state == "frozen" and manifest.get("base_commit") == "0" * 40:
+        raise ValueError("frozen manifest base_commit cannot be the zero placeholder")
+    if manifest_state == "frozen" and (
+        model.get("name") == "record-at-run-time"
+        or model.get("reasoning") == "fixed-per-comparison"
+        or manifest.get("hardware") == "public-fixture-reference"
+    ):
+        raise ValueError("frozen manifest cannot retain template placeholder metadata")
     suite_id = manifest.get("suite_id")
     tasks = manifest.get("tasks")
     if not isinstance(suite_id, str) or not suite_id:
@@ -126,6 +164,10 @@ def validate_manifest(path: Path) -> dict[str, Any]:
             )
         if task.get("risk_class") not in ("ordinary", "high"):
             raise ValueError(f"tasks[{index}].risk_class must be ordinary or high")
+        if task.get("blast_radius") not in ("small", "medium"):
+            raise ValueError(f"tasks[{index}].blast_radius must be small or medium")
+        if task.get("path_class") not in ("ordinary", "hotspot"):
+            raise ValueError(f"tasks[{index}].path_class must be ordinary or hotspot")
         _require_positive_integer(
             task.get("time_limit_seconds"), f"tasks[{index}].time_limit_seconds"
         )
@@ -137,27 +179,20 @@ def validate_manifest(path: Path) -> dict[str, Any]:
         expected_prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         if prompt_sha256 != expected_prompt_hash:
             raise ValueError(f"tasks[{index}].prompt_sha256 does not match prompt")
-        source_paths = task.get("source_paths")
-        if not isinstance(source_paths, list) or not source_paths:
-            raise ValueError(f"tasks[{index}].source_paths must be a non-empty array")
-        for source_path in source_paths:
-            if not isinstance(source_path, str):
-                raise ValueError(f"tasks[{index}].source_paths must contain strings")
-            normalized = PurePosixPath(source_path.replace("\\", "/"))
-            if (
-                PureWindowsPath(source_path).is_absolute()
-                or normalized.is_absolute()
-                or ".." in normalized.parts
-            ):
-                raise ValueError(
-                    f"tasks[{index}].source_paths must be repository-relative"
-                )
-    return {"status": "valid", "suite_id": suite_id, "task_count": len(tasks)}
+        _validate_repo_relative_paths(task, index, "source_paths", required=True)
+        _validate_repo_relative_paths(task, index, "expected_callers", required=False)
+        _validate_repo_relative_paths(task, index, "expected_tests", required=False)
+    return {
+        "status": "valid",
+        "suite_id": suite_id,
+        "task_count": len(tasks),
+        "manifest_state": manifest_state,
+    }
 
 
 def _validate_manifest_binding(
     grouped: dict[str, dict[str, dict[str, Any]]], manifest_path: Path
-) -> None:
+) -> dict[str, Any]:
     validate_manifest(manifest_path)
     manifest = _load_json(manifest_path)
     tasks = manifest["tasks"]
@@ -173,7 +208,11 @@ def _validate_manifest_binding(
             "model": model["name"],
             "reasoning": model["reasoning"],
             "hardware": manifest["hardware"],
+            "language": task["language"],
+            "category": task["category"],
             "risk_class": task["risk_class"],
+            "blast_radius": task["blast_radius"],
+            "path_class": task["path_class"],
             "prompt_sha256": task["prompt_sha256"],
             "base_commit": manifest["base_commit"],
             "time_limit_seconds": task["time_limit_seconds"],
@@ -185,6 +224,7 @@ def _validate_manifest_binding(
                     raise ValueError(
                         f"task {task_id} arm {arm} field {field} differs from manifest"
                     )
+    return manifest
 
 
 def validate_runs(path: Path, manifest_path: Path | None = None) -> dict[str, Any]:
@@ -210,10 +250,18 @@ def validate_runs(path: Path, manifest_path: Path | None = None) -> dict[str, An
             raise ValueError(f"duplicate record for task {task_id} arm {arm}")
         by_arm[arm] = record
 
-        for field in ("suite_id", "model", "reasoning", "hardware"):
+        for field in ("suite_id", "model", "reasoning", "hardware", "language"):
             _require_non_empty_string(record.get(field), f"record {index}.{field}")
+        if record.get("category") not in ("fix", "refactor", "investigate"):
+            raise ValueError(
+                f"record {index}.category must be fix, refactor, or investigate"
+            )
         if record.get("risk_class") not in ("ordinary", "high"):
             raise ValueError(f"record {index}.risk_class must be ordinary or high")
+        if record.get("blast_radius") not in ("small", "medium"):
+            raise ValueError(f"record {index}.blast_radius must be small or medium")
+        if record.get("path_class") not in ("ordinary", "hotspot"):
+            raise ValueError(f"record {index}.path_class must be ordinary or hotspot")
         _require_hex_digest(
             record.get("prompt_sha256"), 64, f"record {index}.prompt_sha256"
         )
@@ -236,6 +284,11 @@ def validate_runs(path: Path, manifest_path: Path | None = None) -> dict[str, An
         if accounting_method == "estimate":
             _require_non_empty_string(
                 token_usage.get("tokenizer"), f"record {index}.token_usage.tokenizer"
+            )
+        else:
+            _require_non_empty_string(
+                token_usage.get("usage_source"),
+                f"record {index}.token_usage.usage_source",
             )
         values: list[int] = []
         for field in TOKEN_COMPONENTS:
@@ -262,6 +315,33 @@ def validate_runs(path: Path, manifest_path: Path | None = None) -> dict[str, An
                 raise ValueError(
                     f"record {index}.metrics.{field} must be a non-negative integer"
                 )
+        tool_calls_used = metrics.get("tool_calls_used")
+        if (
+            not isinstance(tool_calls_used, int)
+            or isinstance(tool_calls_used, bool)
+            or tool_calls_used < 0
+        ):
+            raise ValueError(
+                f"record {index}.metrics.tool_calls_used must be a non-negative integer"
+            )
+        elapsed_seconds = metrics.get("elapsed_seconds")
+        if (
+            not isinstance(elapsed_seconds, (int, float))
+            or isinstance(elapsed_seconds, bool)
+            or not math.isfinite(float(elapsed_seconds))
+            or elapsed_seconds < 0
+        ):
+            raise ValueError(
+                f"record {index}.metrics.elapsed_seconds must be a finite non-negative number"
+            )
+        timed_out = metrics.get("timed_out")
+        if not isinstance(timed_out, bool):
+            raise ValueError(f"record {index}.metrics.timed_out must be a boolean")
+        if elapsed_seconds > record["time_limit_seconds"] and not timed_out:
+            raise ValueError(
+                f"record {index}.metrics.timed_out must be true when elapsed_seconds "
+                "exceeds time_limit_seconds"
+            )
         latency_ms = metrics.get("latency_ms")
         if (
             not isinstance(latency_ms, (int, float))
@@ -318,6 +398,7 @@ def validate_runs(path: Path, manifest_path: Path | None = None) -> dict[str, An
             for container, field in (
                 ("token_usage", "accounting_method"),
                 ("token_usage", "tokenizer"),
+                ("token_usage", "usage_source"),
                 ("metrics", "single_primitive_latency_ms"),
             ):
                 if candidate[container].get(field) != reference[container].get(field):
@@ -325,9 +406,28 @@ def validate_runs(path: Path, manifest_path: Path | None = None) -> dict[str, An
                         f"task {task_id} field {container}.{field} differs between arms "
                         f"A and {arm}"
                     )
+    suite_reference = next(iter(grouped.values()))["A"]
+    for task_id, by_arm in grouped.items():
+        record = by_arm["A"]
+        for field in ("suite_id", "model", "reasoning", "hardware", "base_commit"):
+            if record.get(field) != suite_reference.get(field):
+                raise ValueError(
+                    f"task {task_id} field {field} differs from the benchmark suite"
+                )
+        for field in ("accounting_method", "tokenizer", "usage_source"):
+            if record["token_usage"].get(field) != suite_reference["token_usage"].get(
+                field
+            ):
+                raise ValueError(
+                    f"task {task_id} field token_usage.{field} differs from the "
+                    "benchmark suite"
+                )
 
-    if manifest_path is not None:
+    manifest = (
         _validate_manifest_binding(grouped, manifest_path)
+        if manifest_path is not None
+        else None
+    )
 
     return {
         "status": "valid",
@@ -335,6 +435,12 @@ def validate_runs(path: Path, manifest_path: Path | None = None) -> dict[str, An
         "task_count": len(grouped),
         "arms": list(ARMS),
         "manifest_bound": manifest_path is not None,
+        "manifest_state": manifest.get("manifest_state") if manifest else None,
+        "manifest_sha256": (
+            hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+            if manifest_path is not None
+            else None
+        ),
     }
 
 
@@ -438,6 +544,43 @@ def _paired_boolean_delta_ci(
     }
 
 
+def _paired_numeric_delta_ci(
+    baseline_records: list[dict[str, Any]],
+    candidate_records: list[dict[str, Any]],
+    metric: str,
+    *,
+    reduction: bool = False,
+    iterations: int = 2000,
+) -> dict[str, float]:
+    baseline_by_task = {record["task_id"]: record for record in baseline_records}
+    candidate_by_task = {record["task_id"]: record for record in candidate_records}
+    task_ids = sorted(baseline_by_task)
+
+    def value(record: dict[str, Any]) -> float:
+        if metric == "blind_score":
+            return float(record["blind_score"]["score"])
+        return float(record["metrics"][metric])
+
+    deltas = []
+    for task_id in task_ids:
+        baseline_value = value(baseline_by_task[task_id])
+        candidate_value = value(candidate_by_task[task_id])
+        deltas.append(
+            baseline_value - candidate_value
+            if reduction
+            else candidate_value - baseline_value
+        )
+    rng = random.Random(1734)
+    samples = [
+        mean(deltas[rng.randrange(len(deltas))] for _ in deltas)
+        for _ in range(iterations)
+    ]
+    return {
+        "low": round(_percentile(samples, 0.025), 6),
+        "high": round(_percentile(samples, 0.975), 6),
+    }
+
+
 def _high_risk_has_no_regression(
     baseline_records: list[dict[str, Any]], candidate_records: list[dict[str, Any]]
 ) -> bool:
@@ -466,7 +609,59 @@ def _high_risk_has_no_regression(
             return False
         if candidate_metrics["regression_escapes"] > baseline_metrics["regression_escapes"]:
             return False
+        if candidate_metrics["unnecessary_files"] > baseline_metrics["unnecessary_files"]:
+            return False
+        for metric in ("wrong_project", "unsafe_empty", "contradiction"):
+            if candidate_metrics[metric] and not baseline_metrics[metric]:
+                return False
+        if (
+            float(candidate[task_id]["blind_score"]["score"])
+            < float(baseline_record["blind_score"]["score"])
+        ):
+            return False
     return True
+
+
+def _task_set_is_stratified(records: list[dict[str, Any]]) -> bool:
+    one_per_task = {
+        record["task_id"]: record for record in records if record["arm"] == "A"
+    }
+    values = list(one_per_task.values())
+    return (
+        {record["category"] for record in values}
+        == {"fix", "refactor", "investigate"}
+        and {record["blast_radius"] for record in values} == {"small", "medium"}
+        and {record["risk_class"] for record in values} == {"ordinary", "high"}
+        and {record["path_class"] for record in values} == {"ordinary", "hotspot"}
+        and len({record["language"] for record in values}) >= 2
+    )
+
+
+def _runs_respect_execution_budgets(records: list[dict[str, Any]]) -> bool:
+    return all(
+        record["metrics"]["tool_calls_used"] <= record["tool_call_budget"]
+        and float(record["metrics"]["elapsed_seconds"])
+        <= float(record["time_limit_seconds"])
+        and not record["metrics"]["timed_out"]
+        for record in records
+    )
+
+
+def _token_accounting_provenance(
+    records: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    provenance = {
+        (
+            record["token_usage"]["accounting_method"],
+            record["token_usage"].get("usage_source")
+            or record["token_usage"].get("tokenizer"),
+        )
+        for record in records
+    }
+    return [
+        {"accounting_method": method, "source": source}
+        for method, source in sorted(provenance)
+    ]
 
 
 def score_runs(path: Path, manifest_path: Path | None = None) -> dict[str, Any]:
@@ -504,12 +699,21 @@ def score_runs(path: Path, manifest_path: Path | None = None) -> dict[str, Any]:
         "mean_blind_score_delta_points": round(
             candidate["mean_blind_score"] - baseline["mean_blind_score"], 6
         ),
+        "blind_score_delta_ci95_points": _paired_numeric_delta_ci(
+            by_arm["B"], by_arm["C"], "blind_score"
+        ),
         "unnecessary_file_reduction_percent": _reduction_percent(
             baseline["mean_unnecessary_files"], candidate["mean_unnecessary_files"]
+        ),
+        "unnecessary_file_reduction_ci95_count": _paired_numeric_delta_ci(
+            by_arm["B"], by_arm["C"], "unnecessary_files", reduction=True
         ),
         "regression_escape_reduction_percent": _reduction_percent(
             baseline["mean_regression_escapes"],
             candidate["mean_regression_escapes"],
+        ),
+        "regression_escape_reduction_ci95_count": _paired_numeric_delta_ci(
+            by_arm["B"], by_arm["C"], "regression_escapes", reduction=True
         ),
         "latency_reduction_percent": _reduction_percent(
             baseline["p95_latency_ms"], candidate["p95_latency_ms"]
@@ -520,6 +724,13 @@ def score_runs(path: Path, manifest_path: Path | None = None) -> dict[str, Any]:
         ),
     }
     gates = {
+        "manifest_bound": validation["manifest_bound"],
+        "manifest_frozen": validation["manifest_state"] == "frozen",
+        "task_count_between_30_and_50": (
+            PROMOTION_TASK_MIN <= validation["task_count"] <= PROMOTION_TASK_MAX
+        ),
+        "task_set_stratified": _task_set_is_stratified(records),
+        "all_runs_within_execution_budgets": _runs_respect_execution_budgets(records),
         "wrong_project_zero": candidate["wrong_project_count"] == 0,
         "unsafe_empty_zero": candidate["unsafe_empty_count"] == 0,
         "contradiction_zero": candidate["contradiction_count"] == 0,
@@ -535,6 +746,12 @@ def score_runs(path: Path, manifest_path: Path | None = None) -> dict[str, Any]:
         "hidden_test_delta_ci_nonnegative": (
             comparison["hidden_test_pass_delta_ci95_points"]["low"] >= 0.0
         ),
+        "blind_score_delta_nonnegative": (
+            comparison["mean_blind_score_delta_points"] >= 0.0
+        ),
+        "blind_score_delta_ci_nonnegative": (
+            comparison["blind_score_delta_ci95_points"]["low"] >= 0.0
+        ),
         "high_risk_no_regression": _high_risk_has_no_regression(
             by_arm["B"], by_arm["C"]
         ),
@@ -542,9 +759,15 @@ def score_runs(path: Path, manifest_path: Path | None = None) -> dict[str, Any]:
             candidate["mean_unnecessary_files"]
             <= baseline["mean_unnecessary_files"] * 0.8
         ),
+        "unnecessary_file_reduction_ci_nonnegative": (
+            comparison["unnecessary_file_reduction_ci95_count"]["low"] >= 0.0
+        ),
         "regression_escapes_reduced_at_least_20_percent": (
             candidate["mean_regression_escapes"]
             <= baseline["mean_regression_escapes"] * 0.8
+        ),
+        "regression_escape_reduction_ci_nonnegative": (
+            comparison["regression_escape_reduction_ci95_count"]["low"] >= 0.0
         ),
         "total_tokens_reduced_at_least_30_percent": (
             comparison["total_token_reduction_percent"] >= 30.0
@@ -561,11 +784,23 @@ def score_runs(path: Path, manifest_path: Path | None = None) -> dict[str, Any]:
             <= candidate["p95_single_primitive_latency_ms"] * 1.2
         ),
     }
+    first = records[0]
     return {
         "schema_version": 1,
         "status": "scored",
         "record_count": validation["record_count"],
         "task_count": validation["task_count"],
+        "provenance": {
+            "manifest_bound": validation["manifest_bound"],
+            "manifest_state": validation["manifest_state"],
+            "manifest_sha256": validation["manifest_sha256"],
+            "suite_id": first["suite_id"],
+            "model": first["model"],
+            "reasoning": first["reasoning"],
+            "hardware": first["hardware"],
+            "base_commit": first["base_commit"],
+            "token_accounting": _token_accounting_provenance(records),
+        },
         "arms": summaries,
         "comparison": {"C_vs_B": comparison},
         "promotion": {"passed": all(gates.values()), "gates": gates},

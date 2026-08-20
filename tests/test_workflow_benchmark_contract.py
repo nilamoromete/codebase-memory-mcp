@@ -27,6 +27,7 @@ def _task(task_id: str = "c-caller-001") -> dict[str, object]:
         "category": "investigate",
         "risk_class": "high",
         "blast_radius": "small",
+        "path_class": "hotspot",
         "prompt": prompt,
         "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
         "source_paths": ["tests/fixtures/workflow-evidence/c-small/src/math.c"],
@@ -58,25 +59,36 @@ def _run_cli(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _run_record(arm: str) -> dict[str, object]:
-    prompt = _task()["prompt"]
-    assert isinstance(prompt, str)
+def _run_record(
+    arm: str,
+    task: dict[str, object] | None = None,
+    manifest: dict[str, object] | None = None,
+) -> dict[str, object]:
+    selected_task = task or _task()
+    selected_manifest = manifest or _manifest()
+    model = selected_manifest["model"]
+    assert isinstance(model, dict)
     return {
         "schema_version": 1,
-        "suite_id": "workflow-evidence-v1",
-        "task_id": "c-caller-001",
-        "run_id": f"c-caller-001-{arm.lower()}",
+        "suite_id": selected_manifest["suite_id"],
+        "task_id": selected_task["id"],
+        "run_id": f"{selected_task['id']}-{arm.lower()}",
         "arm": arm,
-        "model": "fixture-model",
-        "reasoning": "fixed",
-        "hardware": "fixture-hardware",
-        "risk_class": "high",
-        "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
-        "base_commit": "0" * 40,
-        "time_limit_seconds": 300,
-        "tool_call_budget": 12,
+        "model": model["name"],
+        "reasoning": model["reasoning"],
+        "hardware": selected_manifest["hardware"],
+        "language": selected_task["language"],
+        "category": selected_task["category"],
+        "risk_class": selected_task["risk_class"],
+        "blast_radius": selected_task["blast_radius"],
+        "path_class": selected_task["path_class"],
+        "prompt_sha256": selected_task["prompt_sha256"],
+        "base_commit": selected_manifest["base_commit"],
+        "time_limit_seconds": selected_task["time_limit_seconds"],
+        "tool_call_budget": selected_task["tool_call_budget"],
         "token_usage": {
             "accounting_method": "provider",
+            "usage_source": "fixture-provider-usage",
             "tool_schema_tokens": 100,
             "tool_argument_tokens": 20,
             "tool_response_tokens": 200,
@@ -94,12 +106,85 @@ def _run_record(arm: str) -> dict[str, object]:
             "latency_ms": 100.0,
             "single_primitive_latency_ms": 100.0,
             "compact_response_tokens": 200,
+            "tool_calls_used": 5,
+            "elapsed_seconds": 60.0,
+            "timed_out": False,
         },
         "blind_score": {
             "reviewer_id_hash": "a" * 64,
             "score": 90,
         },
     }
+
+
+def _promotion_manifest() -> dict[str, object]:
+    manifest = _manifest()
+    manifest["manifest_state"] = "frozen"
+    manifest["base_commit"] = "1" * 40
+    tasks: list[dict[str, object]] = []
+    categories = ("fix", "refactor", "investigate")
+    for index in range(30):
+        task = _task(f"promotion-{index:02d}")
+        prompt = f"Frozen reversible benchmark task {index:02d}."
+        task.update(
+            {
+                "language": "c" if index % 2 == 0 else "typescript",
+                "category": categories[index % len(categories)],
+                "risk_class": "high" if index % 2 == 0 else "ordinary",
+                "blast_radius": "medium" if index % 2 == 0 else "small",
+                "path_class": "hotspot" if index % 2 == 0 else "ordinary",
+                "prompt": prompt,
+                "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+            }
+        )
+        tasks.append(task)
+    manifest["tasks"] = tasks
+    return manifest
+
+
+def _promotion_records(manifest: dict[str, object]) -> list[dict[str, object]]:
+    tasks = manifest["tasks"]
+    assert isinstance(tasks, list)
+    records: list[dict[str, object]] = []
+    for task in tasks:
+        assert isinstance(task, dict)
+        for arm in ("A", "B", "C"):
+            record = _run_record(arm, task, manifest)
+            metrics = record["metrics"]
+            token_usage = record["token_usage"]
+            blind_score = record["blind_score"]
+            assert isinstance(metrics, dict)
+            assert isinstance(token_usage, dict)
+            assert isinstance(blind_score, dict)
+            if arm == "B":
+                metrics.update(
+                    {
+                        "targeted_tests_pass": False,
+                        "hidden_tests_pass": False,
+                        "unnecessary_files": 2,
+                        "regression_escapes": 1,
+                        "latency_ms": 200.0,
+                    }
+                )
+                token_usage["completion_tokens"] = 680
+                token_usage["total_tokens"] = 1000
+                blind_score["score"] = 70
+            elif arm == "C":
+                metrics.update(
+                    {
+                        "targeted_tests_pass": True,
+                        "hidden_tests_pass": True,
+                        "unnecessary_files": 1,
+                        "regression_escapes": 0,
+                        "latency_ms": 100.0,
+                        "compact_response_tokens": 210,
+                    }
+                )
+                token_usage["completion_tokens"] = 280
+                token_usage["total_tokens"] = 600
+                blind_score["score"] = 90
+            records.append(record)
+    return records
 
 
 class ManifestContractTests(unittest.TestCase):
@@ -200,7 +285,14 @@ class ManifestContractTests(unittest.TestCase):
                 self.assertIn(field, payload["error"])
 
     def test_validate_manifest_requires_task_classification_and_budgets(self) -> None:
-        for field in ("language", "category", "time_limit_seconds", "tool_call_budget"):
+        for field in (
+            "language",
+            "category",
+            "blast_radius",
+            "path_class",
+            "time_limit_seconds",
+            "tool_call_budget",
+        ):
             with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
                 manifest = _manifest()
                 tasks = manifest["tasks"]
@@ -313,6 +405,10 @@ class RunContractTests(unittest.TestCase):
 
     def test_validate_runs_requires_execution_budget_evidence(self) -> None:
         records = [_run_record(arm) for arm in ("A", "B", "C")]
+        for record in records:
+            metrics = record["metrics"]
+            assert isinstance(metrics, dict)
+            del metrics["tool_calls_used"]
         with tempfile.TemporaryDirectory() as tmp:
             runs_path = Path(tmp) / "runs.jsonl"
             runs_path.write_text(
@@ -326,6 +422,10 @@ class RunContractTests(unittest.TestCase):
 
     def test_provider_token_accounting_requires_usage_source(self) -> None:
         records = [_run_record(arm) for arm in ("A", "B", "C")]
+        for record in records:
+            token_usage = record["token_usage"]
+            assert isinstance(token_usage, dict)
+            del token_usage["usage_source"]
         with tempfile.TemporaryDirectory() as tmp:
             runs_path = Path(tmp) / "runs.jsonl"
             runs_path.write_text(
@@ -413,6 +513,32 @@ class RunContractTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         payload = json.loads(result.stderr)
         self.assertIn("prompt_sha256", payload["error"])
+
+    def test_validate_runs_rejects_cross_task_suite_metadata_drift(self) -> None:
+        manifest = _promotion_manifest()
+        tasks = manifest["tasks"]
+        assert isinstance(tasks, list)
+        first = tasks[0]
+        second = tasks[1]
+        assert isinstance(first, dict)
+        assert isinstance(second, dict)
+        records = [
+            _run_record(arm, task, manifest)
+            for task in (first, second)
+            for arm in ("A", "B", "C")
+        ]
+        for record in records[3:]:
+            record["model"] = "different-model"
+        with tempfile.TemporaryDirectory() as tmp:
+            runs_path = Path(tmp) / "runs.jsonl"
+            runs_path.write_text(
+                "".join(json.dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
+            result = _run_cli("validate-runs", str(runs_path))
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("benchmark suite", json.loads(result.stderr)["error"])
 
     def test_validate_runs_rejects_missing_safety_metric(self) -> None:
         records = [_run_record(arm) for arm in ("A", "B", "C")]
@@ -520,7 +646,150 @@ class RunContractTests(unittest.TestCase):
         self.assertTrue(gates["hidden_test_delta_ci_nonnegative"])
         self.assertTrue(gates["high_risk_no_regression"])
         self.assertTrue(gates["latency_within_1_2x_single_primitive"])
+        self.assertFalse(gates["manifest_bound"])
+        self.assertFalse(summary["promotion"]["passed"])
+
+    def test_score_promotes_only_frozen_stratified_manifest(self) -> None:
+        manifest = _promotion_manifest()
+        records = _promotion_records(manifest)
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_path = Path(tmp) / "manifest.json"
+            runs_path = Path(tmp) / "runs.jsonl"
+            summary_path = Path(tmp) / "summary.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            runs_path.write_text(
+                "".join(json.dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
+            result = _run_cli(
+                "score",
+                str(runs_path),
+                "--manifest",
+                str(manifest_path),
+                "--output",
+                str(summary_path),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+
         self.assertTrue(summary["promotion"]["passed"])
+        gates = summary["promotion"]["gates"]
+        self.assertTrue(gates["manifest_bound"])
+        self.assertTrue(gates["manifest_frozen"])
+        self.assertTrue(gates["task_count_between_30_and_50"])
+        self.assertTrue(gates["task_set_stratified"])
+        provenance = summary["provenance"]
+        self.assertEqual(provenance["manifest_state"], "frozen")
+        self.assertRegex(provenance["manifest_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(
+            provenance["token_accounting"],
+            [
+                {
+                    "accounting_method": "provider",
+                    "source": "fixture-provider-usage",
+                }
+            ],
+        )
+        comparison = summary["comparison"]["C_vs_B"]
+        self.assertGreaterEqual(comparison["blind_score_delta_ci95_points"]["low"], 0)
+        self.assertGreaterEqual(
+            comparison["unnecessary_file_reduction_ci95_count"]["low"], 0
+        )
+        self.assertGreaterEqual(
+            comparison["regression_escape_reduction_ci95_count"]["low"], 0
+        )
+
+    def test_score_blocks_budget_overrun_even_when_quality_gates_pass(self) -> None:
+        manifest = _promotion_manifest()
+        records = _promotion_records(manifest)
+        metrics = records[-1]["metrics"]
+        assert isinstance(metrics, dict)
+        metrics["tool_calls_used"] = 13
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_path = Path(tmp) / "manifest.json"
+            runs_path = Path(tmp) / "runs.jsonl"
+            summary_path = Path(tmp) / "summary.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            runs_path.write_text(
+                "".join(json.dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
+            result = _run_cli(
+                "score",
+                str(runs_path),
+                "--manifest",
+                str(manifest_path),
+                "--output",
+                str(summary_path),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+
+        self.assertFalse(
+            summary["promotion"]["gates"]["all_runs_within_execution_budgets"]
+        )
+        self.assertFalse(summary["promotion"]["passed"])
+
+    def test_score_rejects_thirty_unstratified_tasks(self) -> None:
+        manifest = _promotion_manifest()
+        tasks = manifest["tasks"]
+        assert isinstance(tasks, list)
+        for task in tasks:
+            assert isinstance(task, dict)
+            task["category"] = "fix"
+        records = _promotion_records(manifest)
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_path = Path(tmp) / "manifest.json"
+            runs_path = Path(tmp) / "runs.jsonl"
+            summary_path = Path(tmp) / "summary.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            runs_path.write_text(
+                "".join(json.dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
+            result = _run_cli(
+                "score",
+                str(runs_path),
+                "--manifest",
+                str(manifest_path),
+                "--output",
+                str(summary_path),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+
+        gates = summary["promotion"]["gates"]
+        self.assertTrue(gates["task_count_between_30_and_50"])
+        self.assertFalse(gates["task_set_stratified"])
+        self.assertFalse(summary["promotion"]["passed"])
+
+    def test_bound_template_manifest_remains_non_promotable(self) -> None:
+        manifest = _manifest()
+        records = [_run_record(arm, _task(), manifest) for arm in ("A", "B", "C")]
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_path = Path(tmp) / "manifest.json"
+            runs_path = Path(tmp) / "runs.jsonl"
+            summary_path = Path(tmp) / "summary.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            runs_path.write_text(
+                "".join(json.dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
+            result = _run_cli(
+                "score",
+                str(runs_path),
+                "--manifest",
+                str(manifest_path),
+                "--output",
+                str(summary_path),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+
+        gates = summary["promotion"]["gates"]
+        self.assertTrue(gates["manifest_bound"])
+        self.assertFalse(gates["manifest_frozen"])
+        self.assertFalse(summary["promotion"]["passed"])
 
     def test_score_without_frozen_manifest_is_never_promotable(self) -> None:
         records = [_run_record(arm) for arm in ("A", "B", "C")]
