@@ -73,6 +73,7 @@ check_handler "trace_call_path" "{\"project\":\"$FAKE_PROJECT\",\"function_name\
 check_handler "get_code_snippet" "{\"project\":\"$FAKE_PROJECT\",\"qualified_name\":\"main\"}"
 check_handler "check_index_coverage" "{\"project\":\"$FAKE_PROJECT\",\"paths\":[\"src/main.c\"]}"
 check_handler "get_edit_plan" "{\"project\":\"$FAKE_PROJECT\",\"path\":\"src/main.c\"}"
+check_handler "get_change_risks" "{\"project\":\"$FAKE_PROJECT\",\"paths\":[\"src/main.c\"]}"
 
 # ── Step 4: Final result ──────────────────────────────────────────
 if [ "$FAILURES" -gt 0 ]; then
@@ -80,5 +81,5 @@ if [ "$FAILURES" -gt 0 ]; then
     exit 1
 fi
 
-echo "[smoke_guard] All checks passed (7 handlers, guard + ghost-file invariants)."
+echo "[smoke_guard] All checks passed (8 handlers, guard + ghost-file invariants)."
 exit 0

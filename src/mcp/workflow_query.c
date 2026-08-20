@@ -726,7 +726,8 @@ static bool workflow_collect_request_paths(workflow_query_bundle_t *bundle) {
         bundle->paths[count++] = path;
     }
     if (count == 0U) {
-        return false;
+        bundle->path_count = 0U;
+        return request->allow_empty;
     }
     qsort(bundle->paths, count, sizeof(bundle->paths[0]), workflow_string_pointer_compare);
     size_t unique = 0;
@@ -835,6 +836,7 @@ static bool workflow_set_context_handle(workflow_query_bundle_t *bundle,
     workflow_hash_value(&sha, workflow_view_name(view));
     workflow_hash_value(&sha, bundle->request->symbol);
     workflow_hash_value(&sha, bundle->request->task_type);
+    workflow_hash_value(&sha, bundle->request->query_mode);
     char options[128];
     (void)snprintf(options, sizeof(options), "%zu:%zu:%d:%d:%d",
                    bundle->max_related_files, bundle->max_tests,
@@ -1506,6 +1508,10 @@ static size_t workflow_text_remaining(const cbm_workflow_envelope_t *envelope) {
 static void workflow_finalize_metadata(workflow_query_bundle_t *bundle,
                                        workflow_view_t view) {
     cbm_workflow_envelope_t *envelope = &bundle->result->envelope;
+    bool verified_empty_change_set =
+        view == WORKFLOW_VIEW_CHANGE_RISKS && bundle->request->allow_empty &&
+        bundle->path_count == 0U && !bundle->graph_error &&
+        !bundle->coverage_error && !bundle->storage->oom;
     if (bundle->coverage_incomplete) {
         workflow_add_text(bundle, &envelope->warnings,
                           "source coverage is incomplete for one or more requested paths");
@@ -1529,6 +1535,14 @@ static void workflow_finalize_metadata(workflow_query_bundle_t *bundle,
         envelope->confidence.level = CBM_WORKFLOW_CONFIDENCE_UNKNOWN;
         workflow_add_text(bundle, &envelope->confidence.basis,
                           "a required evidence lookup failed");
+    } else if (verified_empty_change_set) {
+        envelope->risk.level = CBM_WORKFLOW_RISK_LOW;
+        workflow_add_metric(bundle, &envelope->risk.factors,
+                            "changed paths", bundle->path_count);
+        envelope->confidence.level = CBM_WORKFLOW_CONFIDENCE_HIGH;
+        workflow_add_text(
+            bundle, &envelope->confidence.basis,
+            "read-only working-tree status reported no changed paths");
     } else {
         if (bundle->caller_count >= 8U || bundle->related_count >= 20U) {
             envelope->risk.level = CBM_WORKFLOW_RISK_HIGH;
@@ -1537,6 +1551,10 @@ static void workflow_finalize_metadata(workflow_query_bundle_t *bundle,
             envelope->risk.level = CBM_WORKFLOW_RISK_MEDIUM;
         } else {
             envelope->risk.level = CBM_WORKFLOW_RISK_LOW;
+        }
+        if (view == WORKFLOW_VIEW_CHANGE_RISKS) {
+            workflow_add_metric(bundle, &envelope->risk.factors,
+                                "changed paths", bundle->path_count);
         }
         workflow_add_metric(bundle, &envelope->risk.factors,
                             "direct or transitive callers", bundle->caller_count);
@@ -1576,6 +1594,8 @@ static void workflow_finalize_metadata(workflow_query_bundle_t *bundle,
     }
     if (bundle->graph_error || bundle->coverage_error || bundle->storage->oom) {
         envelope->outcome = CBM_WORKFLOW_OUTCOME_ERROR;
+    } else if (verified_empty_change_set) {
+        envelope->outcome = CBM_WORKFLOW_OUTCOME_EMPTY_VERIFIED;
     } else if (envelope->index.freshness == CBM_WORKFLOW_FRESHNESS_DIRTY ||
                envelope->index.freshness == CBM_WORKFLOW_FRESHNESS_STALE) {
         envelope->outcome = CBM_WORKFLOW_OUTCOME_STALE;
@@ -1647,15 +1667,25 @@ static int workflow_query_execute(cbm_workflow_evidence_gate_t *gate,
         cbm_workflow_query_result_clear(result);
         return CBM_STORE_ERR;
     }
-    if (!workflow_load_capabilities(gate, &bundle.capabilities)) {
+    bool verified_empty_change_set =
+        view == WORKFLOW_VIEW_CHANGE_RISKS && request->allow_empty &&
+        bundle.path_count == 0U;
+    if (bundle.path_count == 0U && !verified_empty_change_set) {
+        cbm_workflow_query_result_clear(result);
+        return CBM_STORE_ERR;
+    }
+    if (!verified_empty_change_set &&
+        !workflow_load_capabilities(gate, &bundle.capabilities)) {
         bundle.graph_error = true;
-    } else {
+    } else if (!verified_empty_change_set) {
         workflow_require_capabilities(&bundle);
     }
-    if (!workflow_collect_coverage(&bundle, gate)) {
+    if (!verified_empty_change_set &&
+        !workflow_collect_coverage(&bundle, gate)) {
         bundle.coverage_error = true;
     }
-    if (!bundle.graph_error && !bundle.coverage_error) {
+    if (!verified_empty_change_set && !bundle.graph_error &&
+        !bundle.coverage_error) {
         for (size_t i = 0; i < bundle.path_count; i++) {
             if (workflow_collect_path_graph(&bundle, bundle.paths[i]) !=
                 CBM_STORE_OK) {

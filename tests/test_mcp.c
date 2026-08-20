@@ -176,6 +176,12 @@ typedef struct {
     bool mutated;
 } mcp_evidence_snapshot_hook_probe_t;
 
+typedef struct {
+    const char *path;
+    int calls;
+    bool created;
+} mcp_worktree_snapshot_hook_probe_t;
+
 #ifdef _WIN32
 typedef struct {
     cbm_mcp_server_t *server;
@@ -257,6 +263,20 @@ static void mcp_evidence_snapshot_hook_probe(void *context) {
         cbm_store_coverage_replace_ex(writer, "test-project", &row, 1, &meta) == CBM_STORE_OK;
     probe->mutated = project_updated && generation_updated && coverage_updated;
     cbm_store_close(writer);
+}
+
+static void mcp_worktree_snapshot_hook_probe(void *context) {
+    mcp_worktree_snapshot_hook_probe_t *probe = context;
+    if (!probe || !probe->path) {
+        return;
+    }
+    probe->calls++;
+    FILE *file = cbm_fopen(probe->path, "wb");
+    if (file) {
+        bool wrote = fputs("package main\n", file) > 0;
+        bool closed = fclose(file) == 0;
+        probe->created = wrote && closed;
+    }
 }
 
 #ifdef _WIN32
@@ -9102,6 +9122,40 @@ TEST(tool_get_change_risks_working_tree_handles_clean_and_untracked_read_only) {
     PASS();
 }
 
+TEST(tool_get_change_risks_rejects_working_tree_changes_during_analysis) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+    ASSERT_TRUE(setup_change_risk_git_fixture(tmp));
+
+    char changed_path[640];
+    (void)snprintf(changed_path, sizeof(changed_path),
+                   "%s/project/during-analysis.go", tmp);
+    mcp_worktree_snapshot_hook_probe_t probe = {
+        .path = changed_path,
+    };
+    cbm_mcp_server_set_evidence_snapshot_test_hook(
+        srv, mcp_worktree_snapshot_hook_probe, &probe);
+
+    char *response = cbm_mcp_handle_tool(
+        srv, "get_change_risks",
+        "{\"project\":\"test-project\",\"diff_mode\":\"working_tree\"}");
+    struct stat changed_stat;
+    bool rejected = response && strstr(response, "\"isError\":true") &&
+                    strstr(response, "working tree changed during analysis");
+    bool preserved = probe.calls == 1 && probe.created &&
+                     stat(changed_path, &changed_stat) == 0;
+
+    free(response);
+    cbm_mcp_server_free(srv);
+    bool cleaned = th_rmtree(tmp) == 0;
+
+    ASSERT_TRUE(rejected);
+    ASSERT_TRUE(preserved);
+    ASSERT_TRUE(cleaned);
+    PASS();
+}
+
 /* Call get_code_snippet and extract inner text content.
  * Caller must free returned string. */
 static char *call_snippet(cbm_mcp_server_t *srv, const char *args_json) {
@@ -12560,6 +12614,7 @@ SUITE(mcp) {
     RUN_TEST(tool_get_change_risks_explicit_paths_are_deterministic_and_bounded);
     RUN_TEST(tool_get_change_risks_rejects_ambiguous_or_unsafe_arguments);
     RUN_TEST(tool_get_change_risks_working_tree_handles_clean_and_untracked_read_only);
+    RUN_TEST(tool_get_change_risks_rejects_working_tree_changes_during_analysis);
     RUN_TEST(evidence_gate_pins_one_generation);
     RUN_TEST(evidence_gate_rejects_source_drift);
     RUN_TEST(evidence_gate_surfaces_lookup_error);

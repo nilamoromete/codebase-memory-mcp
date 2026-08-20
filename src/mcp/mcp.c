@@ -1,5 +1,5 @@
 /*
- * mcp.c — MCP server: JSON-RPC 2.0 over stdio with 16 graph/workflow tools.
+ * mcp.c — MCP server: JSON-RPC 2.0 over stdio with 17 graph/workflow tools.
  *
  * Uses yyjson for fast JSON parsing/building.
  * Single-threaded event loop: read line → parse → dispatch → respond.
@@ -40,6 +40,9 @@ enum {
     MCP_WORKFLOW_MAX_LIMIT = 32,
     MCP_WORKFLOW_COMPACT_BYTES = 16 * 1024,
     MCP_WORKFLOW_DETAILED_BYTES = 64 * 1024,
+    MCP_WORKFLOW_GIT_OUTPUT_MAX = 256 * 1024,
+    MCP_WORKFLOW_GIT_DEADLINE_MS = 10 * 1000,
+    MCP_WORKFLOW_GIT_POLL_US = 10 * 1000,
 };
 #define MCP_MS_TO_US 1000LL
 #define MCP_S_TO_US 1000000LL
@@ -685,6 +688,24 @@ static const tool_def_t TOOLS[] = {
      "\"default\":8}},"
      "\"additionalProperties\":false,\"required\":[\"path\"]}"},
 
+    {"get_change_risks", "Get change risks",
+     "Build one deterministic, generation-bound post-edit risk report. Supply either explicit "
+     "repository-relative paths or diff_mode=working_tree. Returns bounded source coverage, "
+     "callers, related files, tests, routes, risk, confidence, and omissions without changing "
+     "the working tree.",
+     "{\"type\":\"object\",\"properties\":{"
+     "\"project\":{\"type\":\"string\",\"minLength\":1},"
+     "\"paths\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":16,"
+     "\"uniqueItems\":true,\"items\":{\"type\":\"string\",\"minLength\":1}},"
+     "\"diff_mode\":{\"type\":\"string\",\"enum\":[\"working_tree\"]},"
+     "\"include_routes\":{\"type\":\"boolean\",\"default\":false},"
+     "\"max_related_files\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":32,"
+     "\"default\":8},"
+     "\"max_tests\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":32,"
+     "\"default\":8}},"
+     "\"oneOf\":[{\"required\":[\"paths\"]},{\"required\":[\"diff_mode\"]}],"
+     "\"additionalProperties\":false}"},
+
     {"detect_changes", "Detect changes",
      "Map a git diff to its BLAST RADIUS. Resolves changed files to the symbols they define, then "
      "runs ONE multi-source graph traversal to the transitive impact set. RESPONSE: base + "
@@ -753,8 +774,9 @@ static const tool_annotation_def_t TOOL_ANNOTATIONS[] = {
     {"delete_project", false, true, true, false},
     {"index_status", false, true, true, false},
     {"check_index_coverage", false, true, true, false},
-    /* Uses resolve_store_read_only(): corrupt stores are refused, never quarantined. */
+    /* Use resolve_store_read_only(): corrupt stores are refused, never quarantined. */
     {"get_edit_plan", true, false, true, false},
+    {"get_change_risks", true, false, true, false},
     {"detect_changes", false, true, true, false},
     {"manage_adr", false, true, false, false},
     {"ingest_traces", false, false, false, false},
@@ -812,7 +834,8 @@ static bool mcp_tool_allowed(cbm_mcp_tool_profile_t profile, const char *name) {
     static const char *const analysis_tools[] = {
         "search_graph",     "query_graph",          "trace_path",     "get_code_snippet",
         "get_graph_schema", "get_architecture",     "search_code",    "list_projects",
-        "index_status",     "check_index_coverage", "get_edit_plan",  "detect_changes",
+        "index_status",     "check_index_coverage", "get_edit_plan",  "get_change_risks",
+        "detect_changes",
     };
     static const char *const scout_tools[] = {
         "search_graph",     "trace_path",           "get_code_snippet", "get_architecture",
@@ -1277,8 +1300,9 @@ static const char MCP_SERVER_INSTRUCTIONS[] =
     "filesystem grep for literal or non-code text, or when graph coverage is insufficient. "
     "Call list_projects before initial use and index_repository only when a repository is not "
     "indexed or to force immediate freshness after a large external update. Once indexed, "
-    "watched projects auto-refresh in the background; use get_edit_plan before editing, "
-    "index_status for project health, and check_index_coverage for every cited path and for "
+    "watched projects auto-refresh in the background; use get_edit_plan before editing and "
+    "get_change_risks before completion. Use index_status for project health, and "
+    "check_index_coverage for every cited path and for "
     "scopes behind negative or exhaustive "
     "claims. Coverage is best-effort, never proof of completeness. Check has_more or nextCursor "
     "and paginate when present.";
@@ -1287,8 +1311,8 @@ static const char MCP_ANALYSIS_SERVER_INSTRUCTIONS[] =
     "This is the analysis tool profile; graph and index mutation tools are unavailable. Use "
     "list_projects and index_status to select a current graph project, then use search_graph, "
     "trace_path, get_code_snippet, query_graph, get_architecture, and search_code for read-only "
-    "analysis. Use get_edit_plan before editing. Call check_index_coverage for every cited path "
-    "and for scopes behind negative or "
+    "analysis. Use get_edit_plan before editing and get_change_risks before completion. Call "
+    "check_index_coverage for every cited path and for scopes behind negative or "
     "exhaustive claims; read flagged ranges or skipped files directly. Coverage is best-effort, "
     "never proof of completeness. Check has_more or nextCursor and paginate when present. If the "
     "project is missing or stale, ask the parent agent to index or refresh it.";
@@ -10681,6 +10705,562 @@ static int mcp_run_shell_command_cancellable(cbm_mcp_server_t *srv, const char *
                                                      result_out);
 }
 
+typedef enum {
+    WORKFLOW_GIT_OK = 0,
+    WORKFLOW_GIT_CANCELLED,
+    WORKFLOW_GIT_DEADLINE,
+    WORKFLOW_GIT_OUTPUT_LIMIT,
+    WORKFLOW_GIT_COMMAND_FAILED,
+    WORKFLOW_GIT_INVALID_OUTPUT,
+    WORKFLOW_GIT_TOO_MANY_PATHS,
+    WORKFLOW_GIT_SUPERVISION_FAILED,
+} workflow_git_status_t;
+
+typedef enum {
+    WORKFLOW_PATH_ADD_OK = 0,
+    WORKFLOW_PATH_ADD_DUPLICATE,
+    WORKFLOW_PATH_ADD_INVALID,
+    WORKFLOW_PATH_ADD_FULL,
+} workflow_path_add_status_t;
+
+typedef struct {
+    char *items[CBM_WORKFLOW_QUERY_MAX_PATHS];
+    char states[CBM_WORKFLOW_QUERY_MAX_PATHS][3];
+    size_t count;
+} workflow_path_list_t;
+
+static void workflow_path_list_clear(workflow_path_list_t *list) {
+    if (!list) {
+        return;
+    }
+    for (size_t i = 0U; i < list->count; i++) {
+        free(list->items[i]);
+    }
+    memset(list, 0, sizeof(*list));
+}
+
+static void workflow_path_list_sort(workflow_path_list_t *list) {
+    if (!list) {
+        return;
+    }
+    for (size_t i = 1U; i < list->count; i++) {
+        char *path = list->items[i];
+        char state[3];
+        memcpy(state, list->states[i], sizeof(state));
+        size_t position = i;
+        while (position > 0U &&
+               strcmp(list->items[position - 1U], path) > 0) {
+            list->items[position] = list->items[position - 1U];
+            memcpy(list->states[position], list->states[position - 1U],
+                   sizeof(list->states[position]));
+            position--;
+        }
+        list->items[position] = path;
+        memcpy(list->states[position], state, sizeof(state));
+    }
+}
+
+static workflow_path_add_status_t workflow_path_list_add(
+    workflow_path_list_t *list, const char *path, const char state[3]) {
+    char normalized[CBM_SZ_4K];
+    if (!list || coverage_normalize_rel(path, false, normalized,
+                                        sizeof(normalized)) != COVERAGE_PATH_OK) {
+        return WORKFLOW_PATH_ADD_INVALID;
+    }
+    for (size_t i = 0U; i < list->count; i++) {
+        if (strcmp(list->items[i], normalized) == 0) {
+            return WORKFLOW_PATH_ADD_DUPLICATE;
+        }
+    }
+    if (list->count >= CBM_WORKFLOW_QUERY_MAX_PATHS) {
+        return WORKFLOW_PATH_ADD_FULL;
+    }
+    char *copy = heap_strdup(normalized);
+    if (!copy) {
+        return WORKFLOW_PATH_ADD_INVALID;
+    }
+    list->items[list->count] = copy;
+    if (state) {
+        memcpy(list->states[list->count], state,
+               sizeof(list->states[list->count]));
+    }
+    list->count++;
+    return WORKFLOW_PATH_ADD_OK;
+}
+
+static bool workflow_path_lists_equal(const workflow_path_list_t *left,
+                                      const workflow_path_list_t *right) {
+    if (!left || !right || left->count != right->count) {
+        return false;
+    }
+    for (size_t i = 0U; i < left->count; i++) {
+        if (strcmp(left->items[i], right->items[i]) != 0 ||
+            memcmp(left->states[i], right->states[i],
+                   sizeof(left->states[i])) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static workflow_git_status_t mcp_run_argv_cancellable_bounded(
+    cbm_mcp_server_t *srv, const char *const *argv,
+    char output_path[CBM_SZ_2K], size_t output_limit) {
+    if (!srv || !argv || !argv[0] || !output_path || output_limit == 0U ||
+        !mcp_command_output_path(output_path)) {
+        return WORKFLOW_GIT_SUPERVISION_FAILED;
+    }
+    static const char command_label[] =
+        "git status --porcelain=v1 --untracked-files=all -z";
+    if (srv->command_test_hook &&
+        !srv->command_test_hook(srv->command_test_context, command_label)) {
+        (void)cbm_unlink(output_path);
+        output_path[0] = '\0';
+        return WORKFLOW_GIT_COMMAND_FAILED;
+    }
+
+#ifdef _WIN32
+    char git_executable[CBM_SZ_4K];
+    const char *found = cbm_find_cli("git", cbm_get_home_dir());
+    int written =
+        found ? snprintf(git_executable, sizeof(git_executable), "%s", found) : -1;
+    if (written <= 0 || written >= (int)sizeof(git_executable)) {
+        (void)cbm_unlink(output_path);
+        output_path[0] = '\0';
+        return WORKFLOW_GIT_SUPERVISION_FAILED;
+    }
+    const char *binary = git_executable;
+#else
+    const char *binary = argv[0];
+#endif
+
+    cbm_proc_opts_t options = {
+        .bin = binary,
+        .argv = argv,
+        .log_file = output_path,
+        .quiet_timeout_ms = 0,
+        .cancel_grace_ms = CBM_SUBPROCESS_DEFAULT_CANCEL_GRACE_MS,
+        .delete_log_on_exit = false,
+    };
+    cbm_subprocess_t *process = NULL;
+    if (cbm_subprocess_spawn(&options, &process) != 0) {
+        (void)cbm_unlink(output_path);
+        output_path[0] = '\0';
+        return WORKFLOW_GIT_SUPERVISION_FAILED;
+    }
+
+    bool cancelled = false;
+    bool deadline_expired = false;
+    bool output_exceeded = false;
+    uint64_t started_at = cbm_now_ms();
+    cbm_proc_result_t result = {0};
+    cbm_proc_poll_t state = CBM_PROC_POLL_RUNNING;
+    for (;;) {
+        if (!cancelled && mcp_request_cancelled(srv)) {
+            cancelled = true;
+            (void)cbm_subprocess_request_cancel(process);
+        }
+        if (!cancelled &&
+            cbm_now_ms() - started_at >= MCP_WORKFLOW_GIT_DEADLINE_MS) {
+            cancelled = true;
+            deadline_expired = true;
+            (void)cbm_subprocess_request_cancel(process);
+        }
+        if (!cancelled) {
+            int64_t observed_size = cbm_file_size(output_path);
+            if (observed_size > 0 &&
+                (uint64_t)observed_size > output_limit) {
+                cancelled = true;
+                output_exceeded = true;
+                (void)cbm_subprocess_request_cancel(process);
+            }
+        }
+        state = cbm_subprocess_poll(process, &result);
+        if (state == CBM_PROC_POLL_TERMINAL) {
+            break;
+        }
+        if (state == CBM_PROC_POLL_ERROR) {
+            cancelled = true;
+            (void)cbm_subprocess_request_cancel(process);
+        }
+        cbm_usleep(MCP_WORKFLOW_GIT_POLL_US);
+    }
+
+    bool supervised = result.tree_quiesced && !result.supervision_failed;
+    cbm_subprocess_destroy(process);
+    int64_t final_size = cbm_file_size(output_path);
+    if (final_size < 0) {
+        supervised = false;
+    } else if ((uint64_t)final_size > output_limit) {
+        output_exceeded = true;
+    }
+    if (!supervised) {
+        return WORKFLOW_GIT_SUPERVISION_FAILED;
+    }
+    if (output_exceeded) {
+        return WORKFLOW_GIT_OUTPUT_LIMIT;
+    }
+    if (deadline_expired) {
+        return WORKFLOW_GIT_DEADLINE;
+    }
+    if (result.cancellation_requested || cancelled) {
+        return WORKFLOW_GIT_CANCELLED;
+    }
+    return result.outcome == CBM_PROC_CLEAN ? WORKFLOW_GIT_OK
+                                            : WORKFLOW_GIT_COMMAND_FAILED;
+}
+
+static workflow_git_status_t workflow_parse_git_status(
+    const char *output_path, workflow_path_list_t *paths) {
+    int64_t file_size = cbm_file_size(output_path);
+    if (file_size < 0 ||
+        (uint64_t)file_size > MCP_WORKFLOW_GIT_OUTPUT_MAX) {
+        return WORKFLOW_GIT_INVALID_OUTPUT;
+    }
+    size_t size = (size_t)file_size;
+    unsigned char *data = malloc(size > 0U ? size : 1U);
+    if (!data) {
+        return WORKFLOW_GIT_SUPERVISION_FAILED;
+    }
+    FILE *file = cbm_fopen(output_path, "rb");
+    size_t read_size = file && size > 0U ? fread(data, 1U, size, file) : 0U;
+    bool read_ok = file && (size == 0U || read_size == size);
+    if (file && fclose(file) != 0) {
+        read_ok = false;
+    }
+    if (!read_ok) {
+        free(data);
+        return WORKFLOW_GIT_INVALID_OUTPUT;
+    }
+
+    workflow_git_status_t status = WORKFLOW_GIT_OK;
+    size_t offset = 0U;
+    while (offset < size) {
+        size_t end = offset;
+        while (end < size && data[end] != '\0') {
+            end++;
+        }
+        size_t entry_size = end - offset;
+        if (end == size || entry_size < 4U || data[offset + 2U] != ' ') {
+            status = WORKFLOW_GIT_INVALID_OUTPUT;
+            break;
+        }
+        size_t path_size = entry_size - 3U;
+        if (path_size >= CBM_SZ_4K) {
+            status = WORKFLOW_GIT_INVALID_OUTPUT;
+            break;
+        }
+        char path[CBM_SZ_4K];
+        memcpy(path, data + offset + 3U, path_size);
+        path[path_size] = '\0';
+        char path_state[3] = {
+            (char)data[offset], (char)data[offset + 1U], '\0',
+        };
+        workflow_path_add_status_t added =
+            workflow_path_list_add(paths, path, path_state);
+        if (added == WORKFLOW_PATH_ADD_FULL) {
+            status = WORKFLOW_GIT_TOO_MANY_PATHS;
+            break;
+        }
+        if (added != WORKFLOW_PATH_ADD_OK) {
+            status = WORKFLOW_GIT_INVALID_OUTPUT;
+            break;
+        }
+
+        bool rename_or_copy =
+            data[offset] == 'R' || data[offset] == 'C' ||
+            data[offset + 1U] == 'R' || data[offset + 1U] == 'C';
+        offset = end + 1U;
+        if (rename_or_copy) {
+            end = offset;
+            while (end < size && data[end] != '\0') {
+                end++;
+            }
+            if (end == size || end == offset) {
+                status = WORKFLOW_GIT_INVALID_OUTPUT;
+                break;
+            }
+            offset = end + 1U;
+        }
+    }
+    free(data);
+    if (status == WORKFLOW_GIT_OK) {
+        workflow_path_list_sort(paths);
+    }
+    return status;
+}
+
+static workflow_git_status_t workflow_collect_working_tree_paths(
+    cbm_mcp_server_t *srv, const char *root_path,
+    workflow_path_list_t *paths) {
+    const char *const argv[] = {
+        "git", "--no-optional-locks", "-C", root_path, "status",
+        "--porcelain=v1", "--untracked-files=all", "-z", NULL,
+    };
+    char output_path[CBM_SZ_2K] = {0};
+    workflow_git_status_t status = mcp_run_argv_cancellable_bounded(
+        srv, argv, output_path, MCP_WORKFLOW_GIT_OUTPUT_MAX);
+    if (status == WORKFLOW_GIT_OK) {
+        status = workflow_parse_git_status(output_path, paths);
+    }
+    if (output_path[0]) {
+        (void)cbm_unlink(output_path);
+    }
+    return status;
+}
+
+static const char *workflow_git_error_message(workflow_git_status_t status) {
+    switch (status) {
+    case WORKFLOW_GIT_CANCELLED:
+        return "working-tree inspection was cancelled";
+    case WORKFLOW_GIT_DEADLINE:
+        return "working-tree inspection exceeded its deadline";
+    case WORKFLOW_GIT_OUTPUT_LIMIT:
+        return "working-tree status exceeded its bounded output";
+    case WORKFLOW_GIT_COMMAND_FAILED:
+        return "working-tree status could not be read from the project root";
+    case WORKFLOW_GIT_INVALID_OUTPUT:
+        return "working-tree status contained an invalid repository path";
+    case WORKFLOW_GIT_TOO_MANY_PATHS:
+        return "working tree has more than 16 changed paths; pass explicit batches";
+    default:
+        return "working-tree inspection could not be safely supervised";
+    }
+}
+
+static bool workflow_change_risks_key_allowed(const char *key) {
+    static const char *const allowed[] = {
+        "project", "paths", "diff_mode", "include_routes",
+        "max_related_files", "max_tests",
+    };
+    if (!key) {
+        return false;
+    }
+    for (size_t i = 0U; i < sizeof(allowed) / sizeof(allowed[0]); i++) {
+        if (strcmp(key, allowed[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static char *handle_get_change_risks(cbm_mcp_server_t *srv,
+                                     const char *args) {
+    yyjson_doc *adoc = args ? yyjson_read(args, strlen(args), 0) : NULL;
+    yyjson_val *root = adoc ? yyjson_doc_get_root(adoc) : NULL;
+    workflow_path_list_t paths = {0};
+    workflow_path_list_t final_paths = {0};
+    cbm_workflow_query_result_t query_result = {0};
+    cbm_workflow_evidence_gate_t gate = {0};
+    bool gate_active = false;
+    char *project = NULL;
+    char *root_path = NULL;
+    char *rendered = NULL;
+    char *response = NULL;
+
+    if (!root || !yyjson_is_obj(root)) {
+        response = cbm_mcp_text_result("arguments must be a JSON object", true);
+        goto cleanup;
+    }
+    size_t index;
+    size_t maximum;
+    yyjson_val *key;
+    yyjson_val *value;
+    yyjson_obj_foreach(root, index, maximum, key, value) {
+        (void)value;
+        const char *name = yyjson_is_str(key) ? yyjson_get_str(key) : NULL;
+        if (!workflow_change_risks_key_allowed(name)) {
+            response = cbm_mcp_text_result(
+                "get_change_risks accepts only its documented arguments", true);
+            goto cleanup;
+        }
+    }
+
+    yyjson_val *paths_value = yyjson_obj_get(root, "paths");
+    yyjson_val *diff_value = yyjson_obj_get(root, "diff_mode");
+    bool explicit_paths = paths_value != NULL;
+    bool working_tree = diff_value != NULL;
+    if (explicit_paths == working_tree) {
+        response = cbm_mcp_text_result(
+            "supply exactly one of paths or diff_mode=working_tree", true);
+        goto cleanup;
+    }
+    yyjson_val *project_value = yyjson_obj_get(root, "project");
+    if (project_value &&
+        (!yyjson_is_str(project_value) || !yyjson_get_str(project_value)[0])) {
+        response =
+            cbm_mcp_text_result("project must be a non-empty string", true);
+        goto cleanup;
+    }
+    yyjson_val *routes_value = yyjson_obj_get(root, "include_routes");
+    if (routes_value && !yyjson_is_bool(routes_value)) {
+        response =
+            cbm_mcp_text_result("include_routes must be a boolean", true);
+        goto cleanup;
+    }
+    yyjson_val *related_value = yyjson_obj_get(root, "max_related_files");
+    yyjson_val *tests_value = yyjson_obj_get(root, "max_tests");
+    if ((related_value && !yyjson_is_int(related_value)) ||
+        (tests_value && !yyjson_is_int(tests_value))) {
+        response = cbm_mcp_text_result(
+            "max_related_files and max_tests must be integers", true);
+        goto cleanup;
+    }
+    int64_t related_limit =
+        related_value ? yyjson_get_int(related_value)
+                      : MCP_WORKFLOW_DEFAULT_LIMIT;
+    int64_t tests_limit =
+        tests_value ? yyjson_get_int(tests_value)
+                    : MCP_WORKFLOW_DEFAULT_LIMIT;
+    if (related_limit < 1 || related_limit > MCP_WORKFLOW_MAX_LIMIT ||
+        tests_limit < 1 || tests_limit > MCP_WORKFLOW_MAX_LIMIT) {
+        response = cbm_mcp_text_result(
+            "max_related_files and max_tests must be between 1 and 32", true);
+        goto cleanup;
+    }
+
+    if (explicit_paths) {
+        if (!yyjson_is_arr(paths_value) || yyjson_arr_size(paths_value) == 0U ||
+            yyjson_arr_size(paths_value) > CBM_WORKFLOW_QUERY_MAX_PATHS) {
+            response = cbm_mcp_text_result(
+                "paths must contain between 1 and 16 repository-relative strings",
+                true);
+            goto cleanup;
+        }
+        size_t path_index;
+        size_t path_maximum;
+        yyjson_val *path_value;
+        yyjson_arr_foreach(paths_value, path_index, path_maximum, path_value) {
+            const char *path =
+                yyjson_is_str(path_value) ? yyjson_get_str(path_value) : NULL;
+            workflow_path_add_status_t added =
+                workflow_path_list_add(&paths, path, NULL);
+            if (added != WORKFLOW_PATH_ADD_OK) {
+                const char *message =
+                    added == WORKFLOW_PATH_ADD_DUPLICATE
+                        ? "paths must be unique after normalization"
+                        : "paths must stay within the project and use "
+                          "repository-relative components";
+                response = cbm_mcp_text_result(message, true);
+                goto cleanup;
+            }
+        }
+        workflow_path_list_sort(&paths);
+    } else if (!yyjson_is_str(diff_value) ||
+               strcmp(yyjson_get_str(diff_value), "working_tree") != 0) {
+        response =
+            cbm_mcp_text_result("diff_mode must be working_tree", true);
+        goto cleanup;
+    }
+
+    project = project_value ? get_project_arg(args) : NULL;
+    if (!project && !project_value && srv && srv->current_project) {
+        project = heap_strdup(srv->current_project);
+    }
+    cbm_store_t *store = resolve_store_read_only(srv, project);
+    if (!store) {
+        char *error = build_no_store_error(project);
+        response = cbm_mcp_text_result(error, true);
+        free(error);
+        goto cleanup;
+    }
+
+    if (working_tree) {
+        root_path = project_root_from_store(store, project);
+        if (!root_path || !root_path[0]) {
+            response = cbm_mcp_text_result(
+                "project root is unavailable for working-tree inspection", true);
+            goto cleanup;
+        }
+        workflow_git_status_t git_status =
+            workflow_collect_working_tree_paths(srv, root_path, &paths);
+        if (git_status != WORKFLOW_GIT_OK) {
+            response = cbm_mcp_text_result(
+                workflow_git_error_message(git_status), true);
+            goto cleanup;
+        }
+    }
+
+    if (cbm_workflow_evidence_gate_begin(store, project, &gate) !=
+        CBM_STORE_OK) {
+        response = cbm_mcp_text_result(
+            "workflow evidence snapshot unavailable", true);
+        goto cleanup;
+    }
+    gate_active = true;
+    if (srv->evidence_snapshot_test_hook) {
+        srv->evidence_snapshot_test_hook(srv->evidence_snapshot_test_context);
+    }
+
+    cbm_workflow_query_request_t request = {
+        .paths = (const char *const *)paths.items,
+        .path_count = paths.count,
+        .query_mode = working_tree ? "working_tree" : "explicit_paths",
+        .max_related_files = (size_t)related_limit,
+        .max_tests = (size_t)tests_limit,
+        .caller_depth = 1,
+        .include_file_aggregation = true,
+        .include_routes = routes_value && yyjson_get_bool(routes_value),
+        .allow_empty = working_tree,
+    };
+    int query_rc =
+        cbm_workflow_query_change_risks(&gate, &request, &query_result);
+    if (query_result._private_storage && !project_value) {
+        query_result.envelope.project.resolution = "current";
+    }
+    int gate_end_rc = cbm_workflow_evidence_gate_end(&gate);
+    gate_active = false;
+    if (gate_end_rc != CBM_STORE_OK) {
+        response = cbm_mcp_text_result(
+            "workflow evidence snapshot could not be closed", true);
+        goto cleanup;
+    }
+
+    if (working_tree) {
+        workflow_git_status_t git_status =
+            workflow_collect_working_tree_paths(srv, root_path, &final_paths);
+        if (git_status != WORKFLOW_GIT_OK) {
+            response = cbm_mcp_text_result(
+                workflow_git_error_message(git_status), true);
+            goto cleanup;
+        }
+        if (!workflow_path_lists_equal(&paths, &final_paths)) {
+            response = cbm_mcp_text_result(
+                "working tree changed during analysis; retry the request", true);
+            goto cleanup;
+        }
+    }
+
+    rendered =
+        query_result._private_storage
+            ? cbm_workflow_envelope_render_compact(
+                  &query_result.envelope, MCP_WORKFLOW_COMPACT_BYTES, false)
+            : NULL;
+    if (!rendered) {
+        response = cbm_mcp_text_result(
+            "workflow evidence could not be rendered within its byte budget",
+            true);
+        goto cleanup;
+    }
+    response = cbm_mcp_text_result(rendered, query_rc != CBM_STORE_OK);
+
+cleanup:
+    if (gate_active) {
+        (void)cbm_workflow_evidence_gate_end(&gate);
+    }
+    free(rendered);
+    free(root_path);
+    free(project);
+    cbm_workflow_query_result_clear(&query_result);
+    workflow_path_list_clear(&paths);
+    workflow_path_list_clear(&final_paths);
+    if (adoc) {
+        yyjson_doc_free(adoc);
+    }
+    return response ? response
+                    : cbm_mcp_text_result("get_change_risks failed", true);
+}
+
 /* Does `node`'s line range overlap any recorded hunk for `file`? Used to scope
  * seed detection to the actually-changed lines rather than the whole file.
  * Non-static (declared in mcp_internal.h) so tests can exercise the overlap
@@ -11712,6 +12292,9 @@ static char *dispatch_tool(cbm_mcp_server_t *srv, const char *tool_name, const c
     }
     if (strcmp(tool_name, "get_edit_plan") == 0) {
         return handle_get_edit_plan(srv, args_json);
+    }
+    if (strcmp(tool_name, "get_change_risks") == 0) {
+        return handle_get_change_risks(srv, args_json);
     }
     if (strcmp(tool_name, "delete_project") == 0) {
         return handle_delete_project(srv, args_json);

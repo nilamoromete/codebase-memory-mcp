@@ -19,11 +19,13 @@ typedef struct {
     size_t path_count;
     const char *symbol;
     const char *task_type;
+    const char *query_mode;
     size_t max_related_files;
     size_t max_tests;
     int caller_depth;
     bool include_file_aggregation;
     bool include_routes;
+    bool allow_empty;
 } cbm_workflow_query_request_t;
 
 /* The envelope owns no strings. _private_storage retains bounded copies until
