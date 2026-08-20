@@ -732,7 +732,7 @@ static char *workflow_render_base(const cbm_workflow_envelope_t *envelope,
                                   bool include_snippets) {
     cbm_sb_t output;
     cbm_sb_init(&output);
-    cbm_tree_scalar_str(&output, "schema_version", "1");
+    cbm_tree_scalar_int(&output, "schema_version", 1);
     cbm_tree_scalar_str(&output, "outcome", workflow_outcome_name(envelope->outcome));
     workflow_tree_scalar_text(&output, "project_id", envelope->project.id);
     workflow_tree_scalar_text(&output, "project_name", envelope->project.display_name);
