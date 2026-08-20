@@ -1100,8 +1100,8 @@ static void workflow_collect_routes(workflow_query_bundle_t *bundle,
          direction < sizeof(directions) / sizeof(directions[0]); direction++) {
         cbm_traverse_result_t traverse = {0};
         if (workflow_bfs(bundle, symbol_ids, symbol_count, directions[direction],
-                         edge_types, edge_type_count, 1, 1,
-                         &traverse) == CBM_STORE_OK) {
+                         edge_types, edge_type_count, 1, &traverse) ==
+            CBM_STORE_OK) {
             for (int i = 0; i < traverse.visited_count; i++) {
                 if (workflow_is_route_node(&traverse.visited[i].node)) {
                     workflow_route_add(
