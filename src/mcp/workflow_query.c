@@ -1240,8 +1240,9 @@ static void workflow_file_stem(const char *path, char *out, size_t out_size) {
     }
     lowered[length] = 0;
     size_t start = 0;
-    if (strncmp(lowered, "test_", 5U) == 0 ||
-        strncmp(lowered, "spec_", 5U) == 0) {
+    if (length >= 5U &&
+        (memcmp(lowered, "test_", 5U) == 0 ||
+         memcmp(lowered, "spec_", 5U) == 0)) {
         start = 5U;
     }
     size_t end = length;
