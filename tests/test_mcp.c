@@ -890,6 +890,7 @@ TEST(mcp_tools_list) {
     ASSERT_NOT_NULL(strstr(json, "index_status"));
     ASSERT_NOT_NULL(strstr(json, "check_index_coverage"));
     ASSERT_NOT_NULL(strstr(json, "get_edit_plan"));
+    ASSERT_NOT_NULL(strstr(json, "get_change_risks"));
     ASSERT_NOT_NULL(strstr(json, "detect_changes"));
     ASSERT_NOT_NULL(strstr(json, "manage_adr"));
     ASSERT_NOT_NULL(strstr(json, "ingest_traces"));
@@ -1070,6 +1071,115 @@ TEST(mcp_get_edit_plan_declares_bounded_closed_contract) {
     PASS();
 }
 
+TEST(mcp_get_change_risks_declares_bounded_closed_contract) {
+    char *json = cbm_mcp_tools_list();
+    ASSERT_NOT_NULL(json);
+    yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
+    yyjson_val *root = doc ? yyjson_doc_get_root(doc) : NULL;
+    yyjson_val *tools = root ? yyjson_obj_get(root, "tools") : NULL;
+    yyjson_val *change_risks = NULL;
+    if (tools && yyjson_is_arr(tools)) {
+        size_t index, max;
+        yyjson_val *tool;
+        yyjson_arr_foreach(tools, index, max, tool) {
+            yyjson_val *name = yyjson_obj_get(tool, "name");
+            if (name && yyjson_is_str(name) &&
+                strcmp(yyjson_get_str(name), "get_change_risks") == 0) {
+                change_risks = tool;
+                break;
+            }
+        }
+    }
+
+    bool found = change_risks != NULL;
+    bool title_ok = false;
+    bool closed = false;
+    bool exact_properties = false;
+    bool exclusive_sources = false;
+    bool paths_bounded = false;
+    bool diff_mode_closed = false;
+    bool related_bounded = false;
+    bool tests_bounded = false;
+    bool routes_boolean = false;
+    if (change_risks) {
+        yyjson_val *title = yyjson_obj_get(change_risks, "title");
+        title_ok = title && yyjson_is_str(title) &&
+                   strcmp(yyjson_get_str(title), "Get change risks") == 0;
+        yyjson_val *schema = yyjson_obj_get(change_risks, "inputSchema");
+        yyjson_val *additional = schema ? yyjson_obj_get(schema, "additionalProperties") : NULL;
+        yyjson_val *properties = schema ? yyjson_obj_get(schema, "properties") : NULL;
+        yyjson_val *one_of = schema ? yyjson_obj_get(schema, "oneOf") : NULL;
+        closed = additional && yyjson_is_bool(additional) &&
+                 !yyjson_get_bool(additional);
+        exact_properties = properties && yyjson_is_obj(properties) &&
+                           yyjson_obj_size(properties) == 6U;
+        exclusive_sources = one_of && yyjson_is_arr(one_of) &&
+                            yyjson_arr_size(one_of) == 2U;
+
+        yyjson_val *paths = properties ? yyjson_obj_get(properties, "paths") : NULL;
+        yyjson_val *items = paths ? yyjson_obj_get(paths, "items") : NULL;
+        yyjson_val *min_items = paths ? yyjson_obj_get(paths, "minItems") : NULL;
+        yyjson_val *max_items = paths ? yyjson_obj_get(paths, "maxItems") : NULL;
+        yyjson_val *unique_items = paths ? yyjson_obj_get(paths, "uniqueItems") : NULL;
+        yyjson_val *item_min = items ? yyjson_obj_get(items, "minLength") : NULL;
+        paths_bounded = paths && items &&
+                        yyjson_is_str(yyjson_obj_get(paths, "type")) &&
+                        strcmp(yyjson_get_str(yyjson_obj_get(paths, "type")), "array") == 0 &&
+                        min_items && max_items && unique_items && item_min &&
+                        yyjson_is_int(min_items) && yyjson_get_int(min_items) == 1 &&
+                        yyjson_is_int(max_items) && yyjson_get_int(max_items) == 16 &&
+                        yyjson_is_bool(unique_items) && yyjson_get_bool(unique_items) &&
+                        yyjson_is_int(item_min) && yyjson_get_int(item_min) == 1;
+
+        yyjson_val *diff_mode =
+            properties ? yyjson_obj_get(properties, "diff_mode") : NULL;
+        yyjson_val *diff_enum = diff_mode ? yyjson_obj_get(diff_mode, "enum") : NULL;
+        diff_mode_closed = diff_enum && yyjson_is_arr(diff_enum) &&
+                           yyjson_arr_size(diff_enum) == 1U &&
+                           yyjson_is_str(yyjson_arr_get(diff_enum, 0U)) &&
+                           strcmp(yyjson_get_str(yyjson_arr_get(diff_enum, 0U)),
+                                  "working_tree") == 0;
+
+        yyjson_val *related =
+            properties ? yyjson_obj_get(properties, "max_related_files") : NULL;
+        yyjson_val *related_min = related ? yyjson_obj_get(related, "minimum") : NULL;
+        yyjson_val *related_max = related ? yyjson_obj_get(related, "maximum") : NULL;
+        related_bounded = related_min && related_max &&
+                          yyjson_is_int(related_min) && yyjson_is_int(related_max) &&
+                          yyjson_get_int(related_min) == 1 &&
+                          yyjson_get_int(related_max) == 32;
+        yyjson_val *tests =
+            properties ? yyjson_obj_get(properties, "max_tests") : NULL;
+        yyjson_val *tests_min = tests ? yyjson_obj_get(tests, "minimum") : NULL;
+        yyjson_val *tests_max = tests ? yyjson_obj_get(tests, "maximum") : NULL;
+        tests_bounded = tests_min && tests_max &&
+                        yyjson_is_int(tests_min) && yyjson_is_int(tests_max) &&
+                        yyjson_get_int(tests_min) == 1 &&
+                        yyjson_get_int(tests_max) == 32;
+        yyjson_val *routes =
+            properties ? yyjson_obj_get(properties, "include_routes") : NULL;
+        routes_boolean = routes && yyjson_is_str(yyjson_obj_get(routes, "type")) &&
+                         strcmp(yyjson_get_str(yyjson_obj_get(routes, "type")),
+                                "boolean") == 0;
+    }
+    if (doc) {
+        yyjson_doc_free(doc);
+    }
+    free(json);
+
+    ASSERT_TRUE(found);
+    ASSERT_TRUE(title_ok);
+    ASSERT_TRUE(closed);
+    ASSERT_TRUE(exact_properties);
+    ASSERT_TRUE(exclusive_sources);
+    ASSERT_TRUE(paths_bounded);
+    ASSERT_TRUE(diff_mode_closed);
+    ASSERT_TRUE(related_bounded);
+    ASSERT_TRUE(tests_bounded);
+    ASSERT_TRUE(routes_boolean);
+    PASS();
+}
+
 TEST(mcp_tools_have_behavior_annotations) {
     struct {
         const char *name;
@@ -1094,6 +1204,7 @@ TEST(mcp_tools_have_behavior_annotations) {
         {"index_status", false, true, true, false},
         {"check_index_coverage", false, true, true, false},
         {"get_edit_plan", true, false, true, false},
+        {"get_change_risks", true, false, true, false},
         {"detect_changes", false, true, true, false},
         {"manage_adr", false, true, false, false},
         {"ingest_traces", false, false, false, false},
@@ -1528,6 +1639,7 @@ TEST(server_handle_analysis_profile_filters_and_rejects_mutators) {
     ASSERT_NOT_NULL(strstr(resp, "analysis tool profile"));
     ASSERT_NOT_NULL(strstr(resp, "check_index_coverage"));
     ASSERT_NOT_NULL(strstr(resp, "get_edit_plan"));
+    ASSERT_NOT_NULL(strstr(resp, "get_change_risks"));
     ASSERT_NULL(strstr(resp, "index_repository"));
     free(resp);
 
@@ -1536,7 +1648,8 @@ TEST(server_handle_analysis_profile_filters_and_rejects_mutators) {
     static const char *const analysis_tools[] = {
         "search_graph",     "query_graph",          "trace_path",     "get_code_snippet",
         "get_graph_schema", "get_architecture",     "search_code",    "list_projects",
-        "index_status",     "check_index_coverage", "get_edit_plan",  "detect_changes",
+        "index_status",     "check_index_coverage", "get_edit_plan",  "get_change_risks",
+        "detect_changes",
     };
     ASSERT_EQ(mcp_response_tool_count(resp), sizeof(analysis_tools) / sizeof(analysis_tools[0]));
     for (size_t i = 0U; i < sizeof(analysis_tools) / sizeof(analysis_tools[0]); i++) {
@@ -1570,6 +1683,7 @@ TEST(server_handle_scout_profile_exposes_only_the_fast_tier) {
     ASSERT_NOT_NULL(strstr(resp, "scout tool profile"));
     ASSERT_NOT_NULL(strstr(resp, "check_index_coverage"));
     ASSERT_NOT_NULL(strstr(resp, "get_edit_plan"));
+    ASSERT_NULL(strstr(resp, "get_change_risks"));
     ASSERT_NULL(strstr(resp, "index_repository"));
     ASSERT_FALSE(mcp_saw_autoindex_log);
     free(resp);
@@ -1585,6 +1699,7 @@ TEST(server_handle_scout_profile_exposes_only_the_fast_tier) {
     ASSERT_TRUE(mcp_response_has_exact_tool(resp, "index_status"));
     ASSERT_TRUE(mcp_response_has_exact_tool(resp, "check_index_coverage"));
     ASSERT_TRUE(mcp_response_has_exact_tool(resp, "get_edit_plan"));
+    ASSERT_FALSE(mcp_response_has_exact_tool(resp, "get_change_risks"));
     ASSERT_FALSE(mcp_response_has_exact_tool(resp, "query_graph"));
     ASSERT_FALSE(mcp_response_has_exact_tool(resp, "search_code"));
     ASSERT_FALSE(mcp_response_has_exact_tool(resp, "get_graph_schema"));
@@ -8602,6 +8717,101 @@ static void cleanup_snippet_dir(const char *tmp_dir) {
     rmdir(tmp_dir);
 }
 
+static bool setup_change_risk_git_fixture(const char *tmp_dir) {
+    char repo[512];
+    int repo_length = snprintf(repo, sizeof(repo), "%s/project", tmp_dir);
+    if (repo_length <= 0 || (size_t)repo_length >= sizeof(repo)) {
+        return false;
+    }
+    const char *const init_args[] = {"init", "-q", NULL};
+    const char *const add_args[] = {
+        "add", "--", "main.go", ".cbm-empty-gitconfig", NULL,
+    };
+    const char *const commit_args[] = {
+        "-c", "user.name=cbm-test",
+        "-c", "user.email=cbm-test@example.invalid",
+        "-c", "commit.gpgsign=false",
+        "commit", "-q", "-m", "fixture", NULL,
+    };
+    return mcp_test_git(repo, init_args) == 0 &&
+           mcp_test_git(repo, add_args) == 0 &&
+           mcp_test_git(repo, commit_args) == 0;
+}
+
+static bool setup_change_risk_graph_fixture(cbm_mcp_server_t *srv) {
+    cbm_store_t *store = cbm_mcp_server_store(srv);
+    cbm_node_t *targets = NULL;
+    int target_count = 0;
+    if (!store || cbm_store_find_nodes_by_file(store, "test-project", "main.go",
+                                               &targets, &target_count) != CBM_STORE_OK) {
+        return false;
+    }
+    int64_t target_id = 0;
+    for (int i = 0; i < target_count; i++) {
+        if (targets[i].name && strcmp(targets[i].name, "ProcessOrder") == 0) {
+            target_id = targets[i].id;
+            break;
+        }
+    }
+    cbm_store_free_nodes(targets, target_count);
+    if (target_id <= 0) {
+        return false;
+    }
+
+    cbm_node_t caller = {
+        .project = "test-project",
+        .label = "Function",
+        .name = "ServeOrder",
+        .qualified_name = "test-project.cmd.api.ServeOrder",
+        .file_path = "cmd/api.go",
+        .start_line = 3,
+        .end_line = 7,
+    };
+    cbm_node_t test = {
+        .project = "test-project",
+        .label = "Function",
+        .name = "TestProcessOrder",
+        .qualified_name = "test-project.tests.TestProcessOrder",
+        .file_path = "tests/main_test.go",
+        .start_line = 3,
+        .end_line = 8,
+    };
+    cbm_node_t route = {
+        .project = "test-project",
+        .label = "Route",
+        .name = "POST /orders",
+        .qualified_name = "test-project.routes.POST_orders",
+        .file_path = "cmd/routes.go",
+        .start_line = 5,
+        .end_line = 5,
+    };
+    int64_t caller_id = cbm_store_upsert_node(store, &caller);
+    int64_t test_id = cbm_store_upsert_node(store, &test);
+    int64_t route_id = cbm_store_upsert_node(store, &route);
+    cbm_edge_t caller_edge = {
+        .project = "test-project",
+        .source_id = caller_id,
+        .target_id = target_id,
+        .type = "CALLS",
+    };
+    cbm_edge_t test_edge = {
+        .project = "test-project",
+        .source_id = test_id,
+        .target_id = target_id,
+        .type = "TESTS",
+    };
+    cbm_edge_t route_edge = {
+        .project = "test-project",
+        .source_id = target_id,
+        .target_id = route_id,
+        .type = "HANDLES",
+    };
+    return caller_id > 0 && test_id > 0 && route_id > 0 &&
+           cbm_store_insert_edge(store, &caller_edge) > 0 &&
+           cbm_store_insert_edge(store, &test_edge) > 0 &&
+           cbm_store_insert_edge(store, &route_edge) > 0;
+}
+
 /* Extract the inner "text" value from an MCP tool result JSON.
  * The MCP envelope is: {"content":[{"type":"text","text":"<inner json>"}]}
  * This returns the unescaped inner JSON. Caller must free. */
@@ -8752,6 +8962,143 @@ TEST(tool_get_edit_plan_surfaces_stale_index_outcome) {
 
     ASSERT_TRUE(success);
     ASSERT_TRUE(stale);
+    PASS();
+}
+
+TEST(tool_get_change_risks_explicit_paths_are_deterministic_and_bounded) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+    ASSERT_TRUE(setup_change_risk_graph_fixture(srv));
+
+    const char *args =
+        "{\"project\":\"test-project\",\"paths\":[\"main.go\"],"
+        "\"include_routes\":true,\"max_related_files\":8,\"max_tests\":8}";
+    char *first_response = cbm_mcp_handle_tool(srv, "get_change_risks", args);
+    char *first_text = extract_text_content(first_response);
+    char *second_response = cbm_mcp_handle_tool(srv, "get_change_risks", args);
+    char *second_text = extract_text_content(second_response);
+    bool success = first_response && second_response &&
+                   strstr(first_response, "\"isError\":true") == NULL &&
+                   strstr(second_response, "\"isError\":true") == NULL;
+    bool envelope = first_text && strstr(first_text, "schema_version: 1") &&
+                    strstr(first_text, "outcome: partial") &&
+                    strstr(first_text, "project_id: test-project") &&
+                    strstr(first_text, "project_resolution: explicit") &&
+                    strstr(first_text, "coverage_requested: 1") &&
+                    strstr(first_text, "direct or transitive callers:") &&
+                    strstr(first_text, "recommended tests:") &&
+                    strstr(first_text, "route entrypoints:") &&
+                    strstr(first_text, "test-project.cmd.api.ServeOrder") &&
+                    strstr(first_text, "test-project.tests.TestProcessOrder") &&
+                    strstr(first_text, "test-project.routes.POST_orders") &&
+                    strstr(first_text, "ROUTE_ENTRYPOINT") &&
+                    strstr(first_text, "context_handle: wf1:") &&
+                    strstr(first_text, "snippets_included: false");
+    bool deterministic = first_text && second_text &&
+                         strcmp(first_text, second_text) == 0;
+    bool bounded = first_text && strlen(first_text) <= 32768U;
+    bool text_only = first_response && second_response &&
+                     strstr(first_response, "\"structuredContent\"") == NULL &&
+                     strstr(second_response, "\"structuredContent\"") == NULL;
+
+    free(first_text);
+    free(first_response);
+    free(second_text);
+    free(second_response);
+    cbm_mcp_server_free(srv);
+    cleanup_snippet_dir(tmp);
+
+    ASSERT_TRUE(success);
+    ASSERT_TRUE(envelope);
+    ASSERT_TRUE(deterministic);
+    ASSERT_TRUE(bounded);
+    ASSERT_TRUE(text_only);
+    PASS();
+}
+
+TEST(tool_get_change_risks_rejects_ambiguous_or_unsafe_arguments) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+    static const char *const invalid[] = {
+        "{}",
+        "{\"paths\":[],\"diff_mode\":\"working_tree\"}",
+        "{\"paths\":[]}",
+        "{\"paths\":[\"../main.go\"]}",
+        "{\"paths\":[\"C:/outside/main.go\"]}",
+        "{\"paths\":[\"main.go\",\"main.go\"]}",
+        "{\"diff_mode\":\"all\"}",
+        "{\"paths\":[\"main.go\"],\"max_tests\":33}",
+        "{\"paths\":[\"main.go\"],\"unknown\":true}",
+    };
+    bool all_rejected = true;
+    for (size_t i = 0U; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        char *response =
+            cbm_mcp_handle_tool(srv, "get_change_risks", invalid[i]);
+        all_rejected = all_rejected && response &&
+                       strstr(response, "\"isError\":true");
+        free(response);
+    }
+    cbm_mcp_server_free(srv);
+    cleanup_snippet_dir(tmp);
+
+    ASSERT_TRUE(all_rejected);
+    PASS();
+}
+
+TEST(tool_get_change_risks_working_tree_handles_clean_and_untracked_read_only) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+    ASSERT_TRUE(setup_change_risk_git_fixture(tmp));
+
+    char repo[512];
+    char untracked_path[640];
+    (void)snprintf(repo, sizeof(repo), "%s/project", tmp);
+    (void)snprintf(untracked_path, sizeof(untracked_path), "%s/new.go", repo);
+    const char *args =
+        "{\"project\":\"test-project\",\"diff_mode\":\"working_tree\"}";
+    char *clean_response = cbm_mcp_handle_tool(srv, "get_change_risks", args);
+    char *clean_text = extract_text_content(clean_response);
+    bool clean_ok = clean_response && clean_text &&
+                    strstr(clean_response, "\"isError\":true") == NULL &&
+                    strstr(clean_text, "outcome: empty_verified") &&
+                    strstr(clean_text, "coverage_requested: 0") &&
+                    strstr(clean_text, "risk_level: low");
+
+    FILE *untracked = cbm_fopen(untracked_path, "wb");
+    ASSERT_NOT_NULL(untracked);
+    ASSERT_GT(fputs("package main\n", untracked), 0);
+    ASSERT_EQ(fclose(untracked), 0);
+
+    char *dirty_response = cbm_mcp_handle_tool(srv, "get_change_risks", args);
+    char *dirty_text = extract_text_content(dirty_response);
+    bool untracked_reported = dirty_response && dirty_text &&
+                              strstr(dirty_response, "\"isError\":true") == NULL &&
+                              strstr(dirty_text, "outcome: partial") &&
+                              strstr(dirty_text, "coverage_requested: 1") &&
+                              strstr(dirty_text, "new.go");
+    const char *const cached_diff[] = {"diff", "--cached", "--quiet", "--", NULL};
+    const char *const tracked_probe[] = {
+        "ls-files", "--error-unmatch", "new.go", NULL,
+    };
+    struct stat source_stat;
+    bool read_only = mcp_test_git(repo, cached_diff) == 0 &&
+                     mcp_test_git(repo, tracked_probe) != 0 &&
+                     stat(untracked_path, &source_stat) == 0;
+
+    free(clean_text);
+    free(clean_response);
+    free(dirty_text);
+    free(dirty_response);
+    cbm_mcp_server_free(srv);
+    bool cleaned = th_rmtree(tmp) == 0;
+
+    ASSERT_TRUE(clean_ok);
+    ASSERT_TRUE(untracked_reported);
+    ASSERT_TRUE(read_only);
+    ASSERT_TRUE(cleaned);
     PASS();
 }
 
@@ -12128,6 +12475,7 @@ SUITE(mcp) {
     RUN_TEST(mcp_tools_help_list_matches_registry);
     RUN_TEST(mcp_tools_list_latest_metadata);
     RUN_TEST(mcp_get_edit_plan_declares_bounded_closed_contract);
+    RUN_TEST(mcp_get_change_risks_declares_bounded_closed_contract);
     RUN_TEST(mcp_tools_have_behavior_annotations);
     RUN_TEST(mcp_index_repository_declares_name_override_issue571);
     RUN_TEST(mcp_tools_array_schemas_have_items);
@@ -12209,6 +12557,9 @@ SUITE(mcp) {
     RUN_TEST(tool_get_edit_plan_detailed_snippets_are_explicit_opt_in);
     RUN_TEST(tool_get_edit_plan_rejects_unclosed_or_unsafe_arguments);
     RUN_TEST(tool_get_edit_plan_surfaces_stale_index_outcome);
+    RUN_TEST(tool_get_change_risks_explicit_paths_are_deterministic_and_bounded);
+    RUN_TEST(tool_get_change_risks_rejects_ambiguous_or_unsafe_arguments);
+    RUN_TEST(tool_get_change_risks_working_tree_handles_clean_and_untracked_read_only);
     RUN_TEST(evidence_gate_pins_one_generation);
     RUN_TEST(evidence_gate_rejects_source_drift);
     RUN_TEST(evidence_gate_surfaces_lookup_error);
