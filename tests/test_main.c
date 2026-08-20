@@ -699,6 +699,7 @@ extern void suite_cypher(void);
 extern void suite_mcp(void);
 extern void suite_mcp_mutation_guard(void);
 extern void suite_workflow_evidence(void);
+extern void suite_workflow_query(void);
 extern void suite_index_supervisor(void);
 extern void suite_daemon(void);
 extern void suite_project_lock(void);
@@ -960,6 +961,7 @@ int main(int argc, char **argv) {
     RUN_SELECTED_SUITE(mcp);
     RUN_SELECTED_SUITE(mcp_mutation_guard);
     RUN_SELECTED_SUITE(workflow_evidence);
+    RUN_SELECTED_SUITE(workflow_query);
     RUN_SELECTED_SUITE(index_supervisor);
 
     /* Shared MCP daemon coordination + private framing */
