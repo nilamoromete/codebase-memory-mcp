@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # smoke_guard.sh — Smoke test for guard and ghost-file invariants.
 #
-# Verifies two properties across all 7 guarded query handlers:
+# Verifies two properties across all 8 guarded query handlers:
 #   1. Each handler returns a guard error for unknown/unindexed projects.
 #   2. No ghost .db file is created for the unknown project name.
 #
@@ -65,7 +65,7 @@ check_handler() {
     fi
 }
 
-# ── Step 3: Test all 7 guarded handlers ───────────────────────────
+# ── Step 3: Test all 8 guarded handlers ───────────────────────────
 check_handler "search_graph" "{\"project\":\"$FAKE_PROJECT\",\"name_pattern\":\".*\"}"
 check_handler "query_graph"  "{\"project\":\"$FAKE_PROJECT\",\"query\":\"MATCH (n) RETURN n LIMIT 1\"}"
 check_handler "get_graph_schema" "{\"project\":\"$FAKE_PROJECT\"}"
