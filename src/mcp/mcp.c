@@ -2199,9 +2199,20 @@ static cbm_store_t *resolve_store_internal(cbm_mcp_server_t *srv, const char *pr
 
     srv->store_last_used = time(NULL);
 
-    /* Already open for this project? */
+    /* Already open for this project? Apply the same live-project predicate as
+     * the file-backed paths below. Embedded callers can select a project before
+     * it has a root or nodes; treating that rootless zero-node row as live would
+     * turn an unresolved identity into authoritative empty graph data. */
     if (srv->current_project && strcmp(srv->current_project, project) == 0 && srv->store) {
-        return srv->store;
+        cbm_project_t cached = {0};
+        if (cbm_store_get_project(srv->store, project, &cached) == CBM_STORE_OK) {
+            bool empty_shadow = project_record_is_empty_shadow(srv->store, project, &cached);
+            cbm_project_free_fields(&cached);
+            if (!empty_shadow) {
+                return srv->store;
+            }
+        }
+        cbm_log_warn("mcp.project_cached_identity_rejected", "project", project);
     }
 
     /* Close old store */
@@ -2590,6 +2601,7 @@ static cbm_store_t *resolve_store_fallback_scan(const char *project) {
         return NULL;
     }
     cbm_store_t *found = NULL;
+    bool ambiguous = false;
     cbm_dirent_t *entry;
     while ((entry = cbm_readdir(d)) != NULL) {
         const char *n = entry->name;
@@ -2603,13 +2615,26 @@ static cbm_store_t *resolve_store_fallback_scan(const char *project) {
         cbm_store_t *st = NULL;
         if (db_live_project_name(full_path, iname, sizeof(iname), &st)) {
             if (strcmp(iname, project) == 0) {
-                found = st; /* adopt — caller takes ownership */
-                break;
+                if (found) {
+                    /* A copied/renamed cache can contain multiple live graphs
+                     * with the same internal name. Directory order is not a
+                     * valid identity rule, so fail closed and release both. */
+                    cbm_store_close(st);
+                    cbm_store_close(found);
+                    found = NULL;
+                    ambiguous = true;
+                    break;
+                }
+                found = st; /* retain while proving uniqueness */
+                continue;
             }
             cbm_store_close(st);
         }
     }
     cbm_closedir(d);
+    if (ambiguous) {
+        cbm_log_warn("mcp.project_internal_name_ambiguous", "project", project);
+    }
     return found;
 }
 
