@@ -8179,9 +8179,23 @@ TEST(tool_ingest_traces_empty) {
  *  IDLE STORE EVICTION
  * ══════════════════════════════════════════════════════════════════ */
 
-TEST(store_idle_eviction) {
+static cbm_mcp_server_t *setup_live_idle_store(void) {
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    if (!srv) {
+        return NULL;
+    }
+    cbm_store_t *store = cbm_mcp_server_store(srv);
+    if (!store || cbm_store_upsert_project(store, "test-evict", cbm_tmpdir()) != CBM_STORE_OK) {
+        cbm_mcp_server_free(srv);
+        return NULL;
+    }
     cbm_mcp_server_set_project(srv, "test-evict");
+    return srv;
+}
+
+TEST(store_idle_eviction) {
+    cbm_mcp_server_t *srv = setup_live_idle_store();
+    ASSERT_NOT_NULL(srv);
 
     /* Trigger resolve_store via a tool call to set store_last_used */
     char *resp = cbm_mcp_handle_tool(srv, "get_graph_schema", "{\"project\":\"test-evict\"}");
@@ -8198,8 +8212,8 @@ TEST(store_idle_eviction) {
 }
 
 TEST(store_idle_no_eviction_within_timeout) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
-    cbm_mcp_server_set_project(srv, "test-evict");
+    cbm_mcp_server_t *srv = setup_live_idle_store();
+    ASSERT_NOT_NULL(srv);
 
     char *resp = cbm_mcp_handle_tool(srv, "get_graph_schema", "{\"project\":\"test-evict\"}");
     free(resp);
@@ -8230,8 +8244,8 @@ TEST(store_idle_evict_protects_initial_store) {
 }
 
 TEST(store_idle_evict_access_resets_timer) {
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
-    cbm_mcp_server_set_project(srv, "test-evict");
+    cbm_mcp_server_t *srv = setup_live_idle_store();
+    ASSERT_NOT_NULL(srv);
 
     /* First access */
     char *resp = cbm_mcp_handle_tool(srv, "get_graph_schema", "{\"project\":\"test-evict\"}");
