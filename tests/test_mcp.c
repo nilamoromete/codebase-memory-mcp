@@ -889,6 +889,7 @@ TEST(mcp_tools_list) {
     ASSERT_NOT_NULL(strstr(json, "delete_project"));
     ASSERT_NOT_NULL(strstr(json, "index_status"));
     ASSERT_NOT_NULL(strstr(json, "check_index_coverage"));
+    ASSERT_NOT_NULL(strstr(json, "get_edit_plan"));
     ASSERT_NOT_NULL(strstr(json, "detect_changes"));
     ASSERT_NOT_NULL(strstr(json, "manage_adr"));
     ASSERT_NOT_NULL(strstr(json, "ingest_traces"));
@@ -954,6 +955,121 @@ TEST(mcp_tools_list_latest_metadata) {
     PASS();
 }
 
+TEST(mcp_get_edit_plan_declares_bounded_closed_contract) {
+    char *json = cbm_mcp_tools_list();
+    ASSERT_NOT_NULL(json);
+    yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
+    yyjson_val *root = doc ? yyjson_doc_get_root(doc) : NULL;
+    yyjson_val *tools = root ? yyjson_obj_get(root, "tools") : NULL;
+    yyjson_val *edit_plan = NULL;
+    if (tools && yyjson_is_arr(tools)) {
+        size_t index, max;
+        yyjson_val *tool;
+        yyjson_arr_foreach(tools, index, max, tool) {
+            yyjson_val *name = yyjson_obj_get(tool, "name");
+            if (name && yyjson_is_str(name) &&
+                strcmp(yyjson_get_str(name), "get_edit_plan") == 0) {
+                edit_plan = tool;
+                break;
+            }
+        }
+    }
+
+    bool found = edit_plan != NULL;
+    bool title_ok = false;
+    bool closed = false;
+    bool exact_properties = false;
+    bool requires_path = false;
+    bool path_bounded = false;
+    bool task_type_closed = false;
+    bool mode_closed = false;
+    bool related_bounded = false;
+    bool tests_bounded = false;
+    bool flags_are_boolean = false;
+    if (edit_plan) {
+        yyjson_val *title = yyjson_obj_get(edit_plan, "title");
+        title_ok = title && yyjson_is_str(title) &&
+                   strcmp(yyjson_get_str(title), "Get edit plan") == 0;
+        yyjson_val *schema = yyjson_obj_get(edit_plan, "inputSchema");
+        yyjson_val *additional = schema ? yyjson_obj_get(schema, "additionalProperties") : NULL;
+        yyjson_val *properties = schema ? yyjson_obj_get(schema, "properties") : NULL;
+        yyjson_val *required = schema ? yyjson_obj_get(schema, "required") : NULL;
+        closed = additional && yyjson_is_bool(additional) &&
+                 !yyjson_get_bool(additional);
+        exact_properties = properties && yyjson_is_obj(properties) &&
+                           yyjson_obj_size(properties) == 8U;
+        if (required && yyjson_is_arr(required)) {
+            size_t index, max;
+            yyjson_val *value;
+            yyjson_arr_foreach(required, index, max, value) {
+                if (yyjson_is_str(value) &&
+                    strcmp(yyjson_get_str(value), "path") == 0) {
+                    requires_path = true;
+                }
+            }
+        }
+        yyjson_val *path = properties ? yyjson_obj_get(properties, "path") : NULL;
+        yyjson_val *path_min = path ? yyjson_obj_get(path, "minLength") : NULL;
+        path_bounded = path && yyjson_is_str(yyjson_obj_get(path, "type")) &&
+                       strcmp(yyjson_get_str(yyjson_obj_get(path, "type")), "string") == 0 &&
+                       path_min && yyjson_is_int(path_min) &&
+                       yyjson_get_int(path_min) == 1;
+
+        yyjson_val *task_type = properties ? yyjson_obj_get(properties, "task_type") : NULL;
+        yyjson_val *task_enum = task_type ? yyjson_obj_get(task_type, "enum") : NULL;
+        task_type_closed = task_enum && yyjson_is_arr(task_enum) &&
+                           yyjson_arr_size(task_enum) == 3U;
+        yyjson_val *mode = properties ? yyjson_obj_get(properties, "mode") : NULL;
+        yyjson_val *mode_enum = mode ? yyjson_obj_get(mode, "enum") : NULL;
+        mode_closed = mode_enum && yyjson_is_arr(mode_enum) &&
+                      yyjson_arr_size(mode_enum) == 2U;
+
+        yyjson_val *related =
+            properties ? yyjson_obj_get(properties, "max_related_files") : NULL;
+        yyjson_val *related_min = related ? yyjson_obj_get(related, "minimum") : NULL;
+        yyjson_val *related_max = related ? yyjson_obj_get(related, "maximum") : NULL;
+        related_bounded = related_min && related_max &&
+                          yyjson_is_int(related_min) && yyjson_is_int(related_max) &&
+                          yyjson_get_int(related_min) == 1 &&
+                          yyjson_get_int(related_max) == 32;
+        yyjson_val *tests =
+            properties ? yyjson_obj_get(properties, "max_tests") : NULL;
+        yyjson_val *tests_min = tests ? yyjson_obj_get(tests, "minimum") : NULL;
+        yyjson_val *tests_max = tests ? yyjson_obj_get(tests, "maximum") : NULL;
+        tests_bounded = tests_min && tests_max &&
+                        yyjson_is_int(tests_min) && yyjson_is_int(tests_max) &&
+                        yyjson_get_int(tests_min) == 1 &&
+                        yyjson_get_int(tests_max) == 32;
+        yyjson_val *snippets =
+            properties ? yyjson_obj_get(properties, "include_snippets") : NULL;
+        yyjson_val *routes =
+            properties ? yyjson_obj_get(properties, "include_routes") : NULL;
+        flags_are_boolean =
+            snippets && routes &&
+            yyjson_is_str(yyjson_obj_get(snippets, "type")) &&
+            yyjson_is_str(yyjson_obj_get(routes, "type")) &&
+            strcmp(yyjson_get_str(yyjson_obj_get(snippets, "type")), "boolean") == 0 &&
+            strcmp(yyjson_get_str(yyjson_obj_get(routes, "type")), "boolean") == 0;
+    }
+    if (doc) {
+        yyjson_doc_free(doc);
+    }
+    free(json);
+
+    ASSERT_TRUE(found);
+    ASSERT_TRUE(title_ok);
+    ASSERT_TRUE(closed);
+    ASSERT_TRUE(exact_properties);
+    ASSERT_TRUE(requires_path);
+    ASSERT_TRUE(path_bounded);
+    ASSERT_TRUE(task_type_closed);
+    ASSERT_TRUE(mode_closed);
+    ASSERT_TRUE(related_bounded);
+    ASSERT_TRUE(tests_bounded);
+    ASSERT_TRUE(flags_are_boolean);
+    PASS();
+}
+
 TEST(mcp_tools_have_behavior_annotations) {
     struct {
         const char *name;
@@ -977,6 +1093,7 @@ TEST(mcp_tools_have_behavior_annotations) {
         {"delete_project", false, true, true, false},
         {"index_status", false, true, true, false},
         {"check_index_coverage", false, true, true, false},
+        {"get_edit_plan", true, false, true, false},
         {"detect_changes", false, true, true, false},
         {"manage_adr", false, true, false, false},
         {"ingest_traces", false, false, false, false},
@@ -1410,6 +1527,7 @@ TEST(server_handle_analysis_profile_filters_and_rejects_mutators) {
     ASSERT_NOT_NULL(resp);
     ASSERT_NOT_NULL(strstr(resp, "analysis tool profile"));
     ASSERT_NOT_NULL(strstr(resp, "check_index_coverage"));
+    ASSERT_NOT_NULL(strstr(resp, "get_edit_plan"));
     ASSERT_NULL(strstr(resp, "index_repository"));
     free(resp);
 
@@ -1418,7 +1536,7 @@ TEST(server_handle_analysis_profile_filters_and_rejects_mutators) {
     static const char *const analysis_tools[] = {
         "search_graph",     "query_graph",          "trace_path",     "get_code_snippet",
         "get_graph_schema", "get_architecture",     "search_code",    "list_projects",
-        "index_status",     "check_index_coverage", "detect_changes",
+        "index_status",     "check_index_coverage", "get_edit_plan",  "detect_changes",
     };
     ASSERT_EQ(mcp_response_tool_count(resp), sizeof(analysis_tools) / sizeof(analysis_tools[0]));
     for (size_t i = 0U; i < sizeof(analysis_tools) / sizeof(analysis_tools[0]); i++) {
@@ -1451,13 +1569,14 @@ TEST(server_handle_scout_profile_exposes_only_the_fast_tier) {
     ASSERT_NOT_NULL(resp);
     ASSERT_NOT_NULL(strstr(resp, "scout tool profile"));
     ASSERT_NOT_NULL(strstr(resp, "check_index_coverage"));
+    ASSERT_NOT_NULL(strstr(resp, "get_edit_plan"));
     ASSERT_NULL(strstr(resp, "index_repository"));
     ASSERT_FALSE(mcp_saw_autoindex_log);
     free(resp);
 
     resp = cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":223,\"method\":\"tools/list\"}");
     ASSERT_NOT_NULL(resp);
-    ASSERT_EQ(mcp_response_tool_count(resp), 7U);
+    ASSERT_EQ(mcp_response_tool_count(resp), 8U);
     ASSERT_TRUE(mcp_response_has_exact_tool(resp, "search_graph"));
     ASSERT_TRUE(mcp_response_has_exact_tool(resp, "trace_path"));
     ASSERT_TRUE(mcp_response_has_exact_tool(resp, "get_code_snippet"));
@@ -1465,6 +1584,7 @@ TEST(server_handle_scout_profile_exposes_only_the_fast_tier) {
     ASSERT_TRUE(mcp_response_has_exact_tool(resp, "list_projects"));
     ASSERT_TRUE(mcp_response_has_exact_tool(resp, "index_status"));
     ASSERT_TRUE(mcp_response_has_exact_tool(resp, "check_index_coverage"));
+    ASSERT_TRUE(mcp_response_has_exact_tool(resp, "get_edit_plan"));
     ASSERT_FALSE(mcp_response_has_exact_tool(resp, "query_graph"));
     ASSERT_FALSE(mcp_response_has_exact_tool(resp, "search_code"));
     ASSERT_FALSE(mcp_response_has_exact_tool(resp, "get_graph_schema"));
@@ -8516,6 +8636,122 @@ static char *extract_text_content(const char *mcp_result) {
     return result;
 }
 
+TEST(tool_get_edit_plan_returns_compact_generation_bound_envelope) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+
+    char *response = cbm_mcp_handle_tool(
+        srv, "get_edit_plan",
+        "{\"project\":\"test-project\",\"path\":\"main.go\","
+        "\"task_type\":\"fix\",\"max_related_files\":8,\"max_tests\":8}");
+    char *text = extract_text_content(response);
+    bool success = response && strstr(response, "\"isError\":true") == NULL;
+    bool compact = text && strstr(text, "schema_version: 1") &&
+                   strstr(text, "project_id: test-project") &&
+                   strstr(text, "coverage_requested: 1") &&
+                   strstr(text, "snippets_included: false") &&
+                   strstr(text, "context_handle: wf1:");
+    bool bounded = text && strlen(text) <= 32768U;
+    bool text_only = response && strstr(response, "\"structuredContent\"") == NULL;
+    free(text);
+    free(response);
+    cbm_mcp_server_free(srv);
+    cleanup_snippet_dir(tmp);
+
+    ASSERT_TRUE(success);
+    ASSERT_TRUE(compact);
+    ASSERT_TRUE(bounded);
+    ASSERT_TRUE(text_only);
+    PASS();
+}
+
+TEST(tool_get_edit_plan_detailed_snippets_are_explicit_opt_in) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+
+    char *response = cbm_mcp_handle_tool(
+        srv, "get_edit_plan",
+        "{\"path\":\"main.go\",\"mode\":\"detailed\","
+        "\"include_snippets\":true,\"include_routes\":true}");
+    char *text = extract_text_content(response);
+    bool success = response && strstr(response, "\"isError\":true") == NULL;
+    bool detailed = text && strstr(text, "snippets_included: true");
+    bool current_project_used =
+        text && strstr(text, "project_id: test-project");
+    free(text);
+    free(response);
+    cbm_mcp_server_free(srv);
+    cleanup_snippet_dir(tmp);
+
+    ASSERT_TRUE(success);
+    ASSERT_TRUE(detailed);
+    ASSERT_TRUE(current_project_used);
+    PASS();
+}
+
+TEST(tool_get_edit_plan_rejects_unclosed_or_unsafe_arguments) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+    static const char *const invalid[] = {
+        "{}",
+        "{\"path\":\"../main.go\"}",
+        "{\"path\":\"C:/outside/main.go\"}",
+        "{\"path\":\"main.go\",\"task_type\":\"rewrite\"}",
+        "{\"path\":\"main.go\",\"mode\":\"verbose\"}",
+        "{\"path\":\"main.go\",\"max_tests\":0}",
+        "{\"path\":\"main.go\",\"unknown\":true}",
+    };
+    bool all_rejected = true;
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        char *response = cbm_mcp_handle_tool(srv, "get_edit_plan", invalid[i]);
+        all_rejected =
+            all_rejected && response && strstr(response, "\"isError\":true");
+        free(response);
+    }
+    cbm_mcp_server_free(srv);
+    cleanup_snippet_dir(tmp);
+
+    ASSERT_TRUE(all_rejected);
+    PASS();
+}
+
+TEST(tool_get_edit_plan_surfaces_stale_index_outcome) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *store = cbm_mcp_server_store(srv);
+    ASSERT_NOT_NULL(store);
+    cbm_coverage_meta_t meta = {
+        .generation = "stale-generation",
+        .index_mode = "full",
+        .recorded_at = "2026-08-20T00:00:00Z",
+        .recording_status = "complete",
+        .hash_records_complete = true,
+        .coverage_version = 1,
+    };
+    ASSERT_EQ(cbm_store_coverage_replace_ex(store, "test-project", NULL, 0, &meta),
+              CBM_STORE_OK);
+
+    char *response = cbm_mcp_handle_tool(
+        srv, "get_edit_plan",
+        "{\"project\":\"test-project\",\"path\":\"main.go\"}");
+    char *text = extract_text_content(response);
+    bool success = response && strstr(response, "\"isError\":true") == NULL;
+    bool stale = text && strstr(text, "outcome: stale") &&
+                 strstr(text, "freshness: stale");
+    free(text);
+    free(response);
+    cbm_mcp_server_free(srv);
+    cleanup_snippet_dir(tmp);
+
+    ASSERT_TRUE(success);
+    ASSERT_TRUE(stale);
+    PASS();
+}
+
 /* Call get_code_snippet and extract inner text content.
  * Caller must free returned string. */
 static char *call_snippet(cbm_mcp_server_t *srv, const char *args_json) {
@@ -11888,6 +12124,7 @@ SUITE(mcp) {
     RUN_TEST(mcp_tools_list);
     RUN_TEST(mcp_tools_help_list_matches_registry);
     RUN_TEST(mcp_tools_list_latest_metadata);
+    RUN_TEST(mcp_get_edit_plan_declares_bounded_closed_contract);
     RUN_TEST(mcp_tools_have_behavior_annotations);
     RUN_TEST(mcp_index_repository_declares_name_override_issue571);
     RUN_TEST(mcp_tools_array_schemas_have_items);
@@ -11965,6 +12202,10 @@ SUITE(mcp) {
     RUN_TEST(tool_check_index_coverage_preserves_multiple_scope_labels);
     RUN_TEST(tool_check_index_coverage_accepts_truncated_ignored_catalog_for_fresh_path_issue1613);
     RUN_TEST(tool_check_index_coverage_rejects_stale_generation);
+    RUN_TEST(tool_get_edit_plan_returns_compact_generation_bound_envelope);
+    RUN_TEST(tool_get_edit_plan_detailed_snippets_are_explicit_opt_in);
+    RUN_TEST(tool_get_edit_plan_rejects_unclosed_or_unsafe_arguments);
+    RUN_TEST(tool_get_edit_plan_surfaces_stale_index_outcome);
     RUN_TEST(evidence_gate_pins_one_generation);
     RUN_TEST(evidence_gate_rejects_source_drift);
     RUN_TEST(evidence_gate_surfaces_lookup_error);
