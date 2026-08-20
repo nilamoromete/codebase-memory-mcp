@@ -168,6 +168,13 @@ typedef struct {
     bool removed;
 } mcp_list_collection_hook_probe_t;
 
+typedef struct {
+    const char *db_path;
+    const char *root_path;
+    int calls;
+    bool mutated;
+} mcp_evidence_snapshot_hook_probe_t;
+
 #ifdef _WIN32
 typedef struct {
     cbm_mcp_server_t *server;
@@ -215,6 +222,40 @@ static void mcp_list_collection_hook_probe(void *context) {
     }
     probe->calls++;
     probe->removed = cbm_unlink(probe->db_path) == 0;
+}
+
+static void mcp_evidence_snapshot_hook_probe(void *context) {
+    mcp_evidence_snapshot_hook_probe_t *probe = context;
+    if (!probe || !probe->db_path || !probe->root_path) {
+        return;
+    }
+    probe->calls++;
+    cbm_store_t *writer = cbm_store_open(probe->db_path);
+    if (!writer) {
+        return;
+    }
+    cbm_coverage_row_t row = {
+        .rel_path = "main.go",
+        .kind = "parse_partial",
+        .detail = "1-2",
+    };
+    cbm_coverage_meta_t meta = {
+        .generation = "evidence-generation-b",
+        .index_mode = "fast",
+        .recorded_at = "2026-08-20T00:00:00Z",
+        .recording_status = "complete",
+        .coverage_version = 1,
+        .hash_records_complete = true,
+    };
+    bool project_updated =
+        cbm_store_upsert_project(writer, "test-project", probe->root_path) == CBM_STORE_OK;
+    bool generation_updated =
+        cbm_store_exec(writer, "UPDATE projects SET indexed_at='evidence-generation-b' "
+                               "WHERE name='test-project';") == CBM_STORE_OK;
+    bool coverage_updated =
+        cbm_store_coverage_replace_ex(writer, "test-project", &row, 1, &meta) == CBM_STORE_OK;
+    probe->mutated = project_updated && generation_updated && coverage_updated;
+    cbm_store_close(writer);
 }
 
 #ifdef _WIN32
@@ -2589,7 +2630,7 @@ TEST(tool_index_status_no_project) {
  * absent even though the authoritative index_coverage table contains it.  The
  * targeted coverage tool must query that table rather than scan the capped
  * presentation response. */
-TEST(tool_check_index_coverage_finds_path_beyond_status_cap) {
+TEST(evidence_gate_checks_path_beyond_status_cap) {
     enum { ROW_COUNT = 502 };
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
     ASSERT_NOT_NULL(srv);
@@ -2734,6 +2775,87 @@ static int write_coverage_meta(cbm_store_t *store, const char *generation,
     return cbm_store_coverage_replace_ex(store, "test-project", NULL, 0, &meta);
 }
 
+TEST(evidence_gate_pins_one_generation) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_evidence_snapshot_XXXXXX");
+    ASSERT_NOT_NULL(cbm_mkdtemp(tmp));
+    char root_path[512];
+    char source_path[512];
+    char db_path[512];
+    snprintf(root_path, sizeof(root_path), "%s/project", tmp);
+    snprintf(source_path, sizeof(source_path), "%s/main.go", root_path);
+    snprintf(db_path, sizeof(db_path), "%s/evidence.db", tmp);
+    ASSERT_EQ(cbm_mkdir(root_path), 0);
+    ASSERT_EQ(th_write_file(source_path, "package main\n"), 0);
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(db_path);
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *store = cbm_mcp_server_store(srv);
+    ASSERT_NOT_NULL(store);
+    ASSERT_EQ(cbm_store_upsert_project(store, "test-project", root_path), CBM_STORE_OK);
+    cbm_mcp_server_set_project(srv, "test-project");
+
+    struct stat source_stat;
+    ASSERT_EQ(stat(source_path, &source_stat), 0);
+#ifdef __APPLE__
+    int64_t source_mtime_ns =
+        ((int64_t)source_stat.st_mtimespec.tv_sec * (int64_t)CBM_NSEC_PER_SEC) +
+        (int64_t)source_stat.st_mtimespec.tv_nsec;
+#elif defined(_WIN32)
+    int64_t source_mtime_ns = (int64_t)source_stat.st_mtime * (int64_t)CBM_NSEC_PER_SEC;
+#else
+    int64_t source_mtime_ns = ((int64_t)source_stat.st_mtim.tv_sec * (int64_t)CBM_NSEC_PER_SEC) +
+                              (int64_t)source_stat.st_mtim.tv_nsec;
+#endif
+    ASSERT_EQ(cbm_store_upsert_file_hash(store, "test-project", "main.go", "fixture",
+                                         source_mtime_ns, source_stat.st_size),
+              CBM_STORE_OK);
+    cbm_project_t project = {0};
+    ASSERT_EQ(cbm_store_get_project(store, "test-project", &project), CBM_STORE_OK);
+    char initial_generation[CBM_SZ_128];
+    snprintf(initial_generation, sizeof(initial_generation), "%s", project.indexed_at);
+    cbm_coverage_meta_t meta = {
+        .generation = project.indexed_at,
+        .index_mode = "fast",
+        .recorded_at = "2026-08-20T00:00:00Z",
+        .recording_status = "complete",
+        .coverage_version = 1,
+        .hash_records_complete = true,
+    };
+    ASSERT_EQ(cbm_store_coverage_replace_ex(store, "test-project", NULL, 0, &meta), CBM_STORE_OK);
+    cbm_project_free_fields(&project);
+
+    mcp_evidence_snapshot_hook_probe_t probe = {
+        .db_path = db_path,
+        .root_path = root_path,
+    };
+    cbm_mcp_server_set_evidence_snapshot_test_hook(srv, mcp_evidence_snapshot_hook_probe, &probe);
+    char *response = cbm_mcp_handle_tool(srv, "check_index_coverage",
+                                         "{\"project\":\"test-project\",\"paths\":[\"main.go\"]}");
+    char *inner = extract_text_content(response);
+    bool hook_ok = probe.calls == 1 && probe.mutated;
+    bool generation_pinned = inner && strstr(inner, initial_generation) != NULL &&
+                             strstr(inner, "\"status\":\"no_recorded_issue\"") != NULL &&
+                             strstr(inner, "parse_partial") == NULL;
+
+    free(inner);
+    free(response);
+    cbm_mcp_server_free(srv);
+    cbm_unlink(source_path);
+    char sidecar[576];
+    snprintf(sidecar, sizeof(sidecar), "%s-wal", db_path);
+    cbm_unlink(sidecar);
+    snprintf(sidecar, sizeof(sidecar), "%s-shm", db_path);
+    cbm_unlink(sidecar);
+    cbm_unlink(db_path);
+    cbm_rmdir(root_path);
+    cbm_rmdir(tmp);
+
+    ASSERT_TRUE(hook_ok);
+    ASSERT_TRUE(generation_pinned);
+    PASS();
+}
+
 TEST(tool_check_index_coverage_accepts_truncated_ignored_catalog_for_fresh_path_issue1613) {
     char tmp[256];
     cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
@@ -2821,7 +2943,7 @@ TEST(tool_check_index_coverage_rejects_stale_generation) {
     PASS();
 }
 
-TEST(tool_check_index_coverage_requires_source_when_file_metadata_changed) {
+TEST(evidence_gate_rejects_source_drift) {
     char tmp[256];
     cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
     ASSERT_NOT_NULL(srv);
@@ -2839,18 +2961,26 @@ TEST(tool_check_index_coverage_requires_source_when_file_metadata_changed) {
     ASSERT_NOT_NULL(response);
     char *inner = extract_text_content(response);
     ASSERT_NOT_NULL(inner);
-    ASSERT_NOT_NULL(strstr(inner, "\"generation_matches\":true"));
-    ASSERT_NOT_NULL(strstr(inner, "\"freshness\":\"metadata_changed\""));
-    ASSERT_NOT_NULL(strstr(inner, "\"recommended_action\":\"read_source_and_reindex\""));
+    bool generation_matches = strstr(inner, "\"generation_matches\":true") != NULL;
+    bool source_changed = strstr(inner, "\"freshness\":\"metadata_changed\"") != NULL;
+    bool fail_closed = strstr(inner, "\"status\":\"coverage_unavailable\"") != NULL &&
+                       strstr(inner, "\"status\":\"no_recorded_issue\"") == NULL;
+    bool action_requires_source =
+        strstr(inner, "\"recommended_action\":\"read_source_and_reindex\"") != NULL;
 
     free(inner);
     free(response);
     cbm_mcp_server_free(srv);
     cleanup_snippet_dir(tmp);
+
+    ASSERT_TRUE(generation_matches);
+    ASSERT_TRUE(source_changed);
+    ASSERT_TRUE(fail_closed);
+    ASSERT_TRUE(action_requires_source);
     PASS();
 }
 
-TEST(tool_check_index_coverage_surfaces_lookup_errors) {
+TEST(evidence_gate_surfaces_lookup_error) {
     char tmp[256];
     cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
     ASSERT_NOT_NULL(srv);
@@ -2878,6 +3008,62 @@ TEST(tool_check_index_coverage_surfaces_lookup_errors) {
     free(response);
     cbm_mcp_server_free(srv);
     cleanup_snippet_dir(tmp);
+    PASS();
+}
+
+TEST(evidence_gate_empty_requires_fresh_full_coverage) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *store = cbm_mcp_server_store(srv);
+    ASSERT_NOT_NULL(store);
+    char source_path[512];
+    snprintf(source_path, sizeof(source_path), "%s/project/main.go", tmp);
+    struct stat source_stat;
+    ASSERT_EQ(stat(source_path, &source_stat), 0);
+#ifdef __APPLE__
+    int64_t source_mtime_ns =
+        ((int64_t)source_stat.st_mtimespec.tv_sec * (int64_t)CBM_NSEC_PER_SEC) +
+        (int64_t)source_stat.st_mtimespec.tv_nsec;
+#elif defined(_WIN32)
+    int64_t source_mtime_ns = (int64_t)source_stat.st_mtime * (int64_t)CBM_NSEC_PER_SEC;
+#else
+    int64_t source_mtime_ns = ((int64_t)source_stat.st_mtim.tv_sec * (int64_t)CBM_NSEC_PER_SEC) +
+                              (int64_t)source_stat.st_mtim.tv_nsec;
+#endif
+    ASSERT_EQ(cbm_store_upsert_file_hash(store, "test-project", "main.go", "fixture",
+                                         source_mtime_ns, source_stat.st_size),
+              CBM_STORE_OK);
+    cbm_project_t project = {0};
+    ASSERT_EQ(cbm_store_get_project(store, "test-project", &project), CBM_STORE_OK);
+    ASSERT_EQ(write_coverage_meta(store, project.indexed_at, "complete"), CBM_STORE_OK);
+    cbm_project_free_fields(&project);
+
+    char *response = cbm_mcp_handle_tool(
+        srv, "check_index_coverage",
+        "{\"project\":\"test-project\",\"paths\":[\"main.go\",\"untracked.go\"]}");
+    char *inner = extract_text_content(response);
+    yyjson_doc *doc = inner ? yyjson_read(inner, strlen(inner), 0) : NULL;
+    yyjson_val *paths = doc ? yyjson_obj_get(yyjson_doc_get_root(doc), "paths") : NULL;
+    yyjson_val *fresh_item = paths ? yyjson_arr_get(paths, 0) : NULL;
+    yyjson_val *absent_item = paths ? yyjson_arr_get(paths, 1) : NULL;
+    const char *fresh_status =
+        fresh_item ? yyjson_get_str(yyjson_obj_get(fresh_item, "status")) : NULL;
+    const char *absent_status =
+        absent_item ? yyjson_get_str(yyjson_obj_get(absent_item, "status")) : NULL;
+    bool only_full_coverage_is_authoritative =
+        fresh_status && strcmp(fresh_status, "no_recorded_issue") == 0 && absent_status &&
+        strcmp(absent_status, "coverage_unavailable") == 0;
+
+    if (doc) {
+        yyjson_doc_free(doc);
+    }
+    free(inner);
+    free(response);
+    cbm_mcp_server_free(srv);
+    cleanup_snippet_dir(tmp);
+
+    ASSERT_TRUE(only_full_coverage_is_authoritative);
     PASS();
 }
 
@@ -11716,13 +11902,15 @@ SUITE(mcp) {
     RUN_TEST(mcp_resource_discovery_methods_return_empty_lists);
     RUN_TEST(tool_query_graph_basic);
     RUN_TEST(tool_index_status_no_project);
-    RUN_TEST(tool_check_index_coverage_finds_path_beyond_status_cap);
+    RUN_TEST(evidence_gate_checks_path_beyond_status_cap);
     RUN_TEST(tool_check_index_coverage_reports_paths_scopes_and_ranges);
     RUN_TEST(tool_check_index_coverage_preserves_multiple_scope_labels);
     RUN_TEST(tool_check_index_coverage_accepts_truncated_ignored_catalog_for_fresh_path_issue1613);
     RUN_TEST(tool_check_index_coverage_rejects_stale_generation);
-    RUN_TEST(tool_check_index_coverage_requires_source_when_file_metadata_changed);
-    RUN_TEST(tool_check_index_coverage_surfaces_lookup_errors);
+    RUN_TEST(evidence_gate_pins_one_generation);
+    RUN_TEST(evidence_gate_rejects_source_drift);
+    RUN_TEST(evidence_gate_surfaces_lookup_error);
+    RUN_TEST(evidence_gate_empty_requires_fresh_full_coverage);
     RUN_TEST(tool_index_status_includes_git_metadata);
 
     /* Tool handlers with validation */

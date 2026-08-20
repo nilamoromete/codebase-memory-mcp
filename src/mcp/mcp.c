@@ -1645,6 +1645,8 @@ struct cbm_mcp_server {
     void *command_test_context;
     cbm_mcp_list_collection_test_hook_fn list_collection_test_hook;
     void *list_collection_test_context;
+    cbm_mcp_evidence_snapshot_test_hook_fn evidence_snapshot_test_hook;
+    void *evidence_snapshot_test_context;
     size_t search_output_limit_override;
     cbm_thread_t autoindex_tid;
     bool autoindex_active; /* true if auto-index thread was started */
@@ -1952,6 +1954,16 @@ void cbm_mcp_server_set_list_collection_test_hook(cbm_mcp_server_t *srv,
     }
     srv->list_collection_test_hook = hook;
     srv->list_collection_test_context = context;
+}
+
+void cbm_mcp_server_set_evidence_snapshot_test_hook(cbm_mcp_server_t *srv,
+                                                    cbm_mcp_evidence_snapshot_test_hook_fn hook,
+                                                    void *context) {
+    if (!srv) {
+        return;
+    }
+    srv->evidence_snapshot_test_hook = hook;
+    srv->evidence_snapshot_test_context = context;
 }
 
 void cbm_mcp_server_set_search_output_limit_for_test(cbm_mcp_server_t *srv, size_t limit) {
@@ -4542,6 +4554,9 @@ static char *handle_check_index_coverage(cbm_mcp_server_t *srv, const char *args
                               strcmp(proj.indexed_at, meta.generation) == 0;
     const char *recording_status =
         have_meta && meta.recording_status ? meta.recording_status : "unknown";
+    if (srv->evidence_snapshot_test_hook) {
+        srv->evidence_snapshot_test_hook(srv->evidence_snapshot_test_context);
+    }
 
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *root = yyjson_mut_obj(doc);
