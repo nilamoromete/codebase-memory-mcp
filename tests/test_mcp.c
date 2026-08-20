@@ -8648,7 +8648,9 @@ TEST(tool_get_edit_plan_returns_compact_generation_bound_envelope) {
     char *text = extract_text_content(response);
     bool success = response && strstr(response, "\"isError\":true") == NULL;
     bool compact = text && strstr(text, "schema_version: 1") &&
+                   strstr(text, "outcome: partial") &&
                    strstr(text, "project_id: test-project") &&
+                   strstr(text, "project_resolution: explicit") &&
                    strstr(text, "coverage_requested: 1") &&
                    strstr(text, "snippets_included: false") &&
                    strstr(text, "context_handle: wf1:");
@@ -8679,7 +8681,8 @@ TEST(tool_get_edit_plan_detailed_snippets_are_explicit_opt_in) {
     bool success = response && strstr(response, "\"isError\":true") == NULL;
     bool detailed = text && strstr(text, "snippets_included: true");
     bool current_project_used =
-        text && strstr(text, "project_id: test-project");
+        text && strstr(text, "project_id: test-project") &&
+        strstr(text, "project_resolution: current");
     free(text);
     free(response);
     cbm_mcp_server_free(srv);

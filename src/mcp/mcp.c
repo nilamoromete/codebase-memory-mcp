@@ -1,5 +1,5 @@
 /*
- * mcp.c — MCP server: JSON-RPC 2.0 over stdio with 14 graph tools.
+ * mcp.c — MCP server: JSON-RPC 2.0 over stdio with 16 graph/workflow tools.
  *
  * Uses yyjson for fast JSON parsing/building.
  * Single-threaded event loop: read line → parse → dispatch → respond.
@@ -36,6 +36,10 @@ enum {
     MCP_TOOLS_PAGE_SIZE = 8,
     MCP_HELP_TOOLS_WRAP_COL = 74, /* --help tool list stays readable on 80-col terminals */
     MCP_MAX_CROSS_REPO_TARGETS = 4096,
+    MCP_WORKFLOW_DEFAULT_LIMIT = 8,
+    MCP_WORKFLOW_MAX_LIMIT = 32,
+    MCP_WORKFLOW_COMPACT_BYTES = 16 * 1024,
+    MCP_WORKFLOW_DETAILED_BYTES = 64 * 1024,
 };
 #define MCP_MS_TO_US 1000LL
 #define MCP_S_TO_US 1000000LL
@@ -44,6 +48,7 @@ enum {
 #include "mcp/mcp.h"
 #include "mcp/mcp_internal.h"
 #include "mcp/workflow_evidence.h"
+#include "mcp/workflow_query.h"
 #include "store/store.h"
 #include <sqlite3.h>
 #include "cypher/cypher.h"
@@ -658,6 +663,28 @@ static const tool_def_t TOOLS[] = {
      "\"required\":[\"project\"]"
      "}"},
 
+    {"get_edit_plan", "Get edit plan",
+     "Build one deterministic, generation-bound pre-edit plan for a repository-relative file. "
+     "Returns bounded evidence for source coverage, symbols, callers, related files, tests, "
+     "routes, risk, confidence, and omissions. Compact mode and no snippets are the defaults.",
+     "{\"type\":\"object\",\"properties\":{"
+     "\"project\":{\"type\":\"string\",\"minLength\":1,"
+     "\"description\":\"Exact project identity from list_projects; defaults to the current "
+     "project when one is selected.\"},"
+     "\"path\":{\"type\":\"string\",\"minLength\":1,"
+     "\"description\":\"Repository-relative target file.\"},"
+     "\"task_type\":{\"type\":\"string\","
+     "\"enum\":[\"fix\",\"refactor\",\"investigate\"],\"default\":\"investigate\"},"
+     "\"mode\":{\"type\":\"string\",\"enum\":[\"compact\",\"detailed\"],"
+     "\"default\":\"compact\"},"
+     "\"include_snippets\":{\"type\":\"boolean\",\"default\":false},"
+     "\"include_routes\":{\"type\":\"boolean\",\"default\":false},"
+     "\"max_related_files\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":32,"
+     "\"default\":8},"
+     "\"max_tests\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":32,"
+     "\"default\":8}},"
+     "\"additionalProperties\":false,\"required\":[\"path\"]}"},
+
     {"detect_changes", "Detect changes",
      "Map a git diff to its BLAST RADIUS. Resolves changed files to the symbols they define, then "
      "runs ONE multi-source graph traversal to the transitive impact set. RESPONSE: base + "
@@ -726,6 +753,8 @@ static const tool_annotation_def_t TOOL_ANNOTATIONS[] = {
     {"delete_project", false, true, true, false},
     {"index_status", false, true, true, false},
     {"check_index_coverage", false, true, true, false},
+    /* Uses resolve_store_read_only(): corrupt stores are refused, never quarantined. */
+    {"get_edit_plan", true, false, true, false},
     {"detect_changes", false, true, true, false},
     {"manage_adr", false, true, false, false},
     {"ingest_traces", false, false, false, false},
@@ -783,11 +812,12 @@ static bool mcp_tool_allowed(cbm_mcp_tool_profile_t profile, const char *name) {
     static const char *const analysis_tools[] = {
         "search_graph",     "query_graph",          "trace_path",     "get_code_snippet",
         "get_graph_schema", "get_architecture",     "search_code",    "list_projects",
-        "index_status",     "check_index_coverage", "detect_changes",
+        "index_status",     "check_index_coverage", "get_edit_plan",  "detect_changes",
     };
     static const char *const scout_tools[] = {
-        "search_graph",  "trace_path",   "get_code_snippet",     "get_architecture",
-        "list_projects", "index_status", "check_index_coverage",
+        "search_graph",     "trace_path",           "get_code_snippet", "get_architecture",
+        "list_projects",    "index_status",         "check_index_coverage",
+        "get_edit_plan",
     };
     if (!name) {
         return false;
@@ -1247,8 +1277,9 @@ static const char MCP_SERVER_INSTRUCTIONS[] =
     "filesystem grep for literal or non-code text, or when graph coverage is insufficient. "
     "Call list_projects before initial use and index_repository only when a repository is not "
     "indexed or to force immediate freshness after a large external update. Once indexed, "
-    "watched projects auto-refresh in the background; use index_status for project health and "
-    "check_index_coverage for every cited path and for scopes behind negative or exhaustive "
+    "watched projects auto-refresh in the background; use get_edit_plan before editing, "
+    "index_status for project health, and check_index_coverage for every cited path and for "
+    "scopes behind negative or exhaustive "
     "claims. Coverage is best-effort, never proof of completeness. Check has_more or nextCursor "
     "and paginate when present.";
 
@@ -1256,7 +1287,8 @@ static const char MCP_ANALYSIS_SERVER_INSTRUCTIONS[] =
     "This is the analysis tool profile; graph and index mutation tools are unavailable. Use "
     "list_projects and index_status to select a current graph project, then use search_graph, "
     "trace_path, get_code_snippet, query_graph, get_architecture, and search_code for read-only "
-    "analysis. Call check_index_coverage for every cited path and for scopes behind negative or "
+    "analysis. Use get_edit_plan before editing. Call check_index_coverage for every cited path "
+    "and for scopes behind negative or "
     "exhaustive claims; read flagged ranges or skipped files directly. Coverage is best-effort, "
     "never proof of completeness. Check has_more or nextCursor and paginate when present. If the "
     "project is missing or stale, ask the parent agent to index or refresh it.";
@@ -1264,7 +1296,7 @@ static const char MCP_ANALYSIS_SERVER_INSTRUCTIONS[] =
 static const char MCP_SCOUT_SERVER_INSTRUCTIONS[] =
     "This is the scout tool profile; only the fast positive-discovery graph tools are available. "
     "Use list_projects and index_status to select a current graph project, then use search_graph, "
-    "trace_path, get_code_snippet, and get_architecture with narrow limits. Call "
+    "trace_path, get_code_snippet, get_edit_plan, and get_architecture with narrow limits. Call "
     "check_index_coverage once for every cited path and read flagged ranges directly. Findings "
     "are provisional: do not make absence, exhaustive-impact, or dead-code claims. If the project "
     "is missing or stale, ask the parent agent to index or refresh it.";
@@ -2215,6 +2247,7 @@ typedef enum {
 
 static cbm_store_t *resolve_store_internal(cbm_mcp_server_t *srv, const char *project,
                                            bool mutation_already_held, bool nonblocking_recovery,
+                                           bool allow_quarantine,
                                            store_recovery_status_t *recovery_status) {
     if (recovery_status) {
         *recovery_status = STORE_RECOVERY_NONE;
@@ -2263,6 +2296,11 @@ static cbm_store_t *resolve_store_internal(cbm_mcp_server_t *srv, const char *pr
         if (!cbm_store_check_integrity(srv->store)) {
             cbm_store_close(srv->store);
             srv->store = NULL;
+            if (!allow_quarantine) {
+                cbm_log_warn("store.query_corrupt", "project", project, "action",
+                             "read-only query refused corrupt database");
+                return NULL;
+            }
             bool mutation_acquired = mutation_already_held;
             if (!mutation_acquired) {
                 mutation_acquired = nonblocking_recovery
@@ -2367,7 +2405,12 @@ static cbm_store_t *resolve_store_internal(cbm_mcp_server_t *srv, const char *pr
 }
 
 static cbm_store_t *resolve_store(cbm_mcp_server_t *srv, const char *project) {
-    return resolve_store_internal(srv, project, false, false, NULL);
+    return resolve_store_internal(srv, project, false, false, true, NULL);
+}
+
+static cbm_store_t *resolve_store_read_only(cbm_mcp_server_t *srv,
+                                            const char *project) {
+    return resolve_store_internal(srv, project, false, false, false, NULL);
 }
 
 /* Forward decl — definition lives below alongside list_projects. */
@@ -4352,6 +4395,204 @@ static coverage_path_result_t coverage_normalize_rel(const char *input, bool all
     }
     out[written] = '\0';
     return written > 0U || allow_root ? COVERAGE_PATH_OK : COVERAGE_PATH_INVALID;
+}
+
+static bool workflow_edit_plan_key_allowed(const char *key) {
+    static const char *const allowed[] = {
+        "project",          "path",           "task_type", "mode",
+        "include_snippets", "include_routes", "max_related_files",
+        "max_tests",
+    };
+    if (!key) {
+        return false;
+    }
+    for (size_t i = 0U; i < sizeof(allowed) / sizeof(allowed[0]); i++) {
+        if (strcmp(key, allowed[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool workflow_edit_plan_choice(const yyjson_val *value,
+                                      const char *const *choices,
+                                      size_t choice_count) {
+    if (!value || !yyjson_is_str(value)) {
+        return false;
+    }
+    const char *text = yyjson_get_str(value);
+    for (size_t i = 0U; i < choice_count; i++) {
+        if (strcmp(text, choices[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static char *handle_get_edit_plan(cbm_mcp_server_t *srv, const char *args) {
+    yyjson_doc *adoc = args ? yyjson_read(args, strlen(args), 0) : NULL;
+    yyjson_val *root = adoc ? yyjson_doc_get_root(adoc) : NULL;
+    if (!root || !yyjson_is_obj(root)) {
+        if (adoc) {
+            yyjson_doc_free(adoc);
+        }
+        return cbm_mcp_text_result("arguments must be a JSON object", true);
+    }
+
+    size_t index;
+    size_t maximum;
+    yyjson_val *key;
+    yyjson_val *value;
+    yyjson_obj_foreach(root, index, maximum, key, value) {
+        (void)value;
+        const char *name = yyjson_is_str(key) ? yyjson_get_str(key) : NULL;
+        if (!workflow_edit_plan_key_allowed(name)) {
+            yyjson_doc_free(adoc);
+            return cbm_mcp_text_result(
+                "get_edit_plan accepts only its documented arguments", true);
+        }
+    }
+
+    yyjson_val *path_value = yyjson_obj_get(root, "path");
+    const char *path =
+        path_value && yyjson_is_str(path_value) ? yyjson_get_str(path_value) : NULL;
+    if (!path || !path[0]) {
+        yyjson_doc_free(adoc);
+        return cbm_mcp_text_result(
+            "path is required and must be a non-empty repository-relative string", true);
+    }
+    yyjson_val *project_value = yyjson_obj_get(root, "project");
+    if (project_value &&
+        (!yyjson_is_str(project_value) || !yyjson_get_str(project_value)[0])) {
+        yyjson_doc_free(adoc);
+        return cbm_mcp_text_result("project must be a non-empty string", true);
+    }
+
+    static const char *const task_types[] = {"fix", "refactor", "investigate"};
+    yyjson_val *task_value = yyjson_obj_get(root, "task_type");
+    if (task_value &&
+        !workflow_edit_plan_choice(task_value, task_types,
+                                   sizeof(task_types) / sizeof(task_types[0]))) {
+        yyjson_doc_free(adoc);
+        return cbm_mcp_text_result(
+            "task_type must be fix, refactor, or investigate", true);
+    }
+    static const char *const modes[] = {"compact", "detailed"};
+    yyjson_val *mode_value = yyjson_obj_get(root, "mode");
+    if (mode_value &&
+        !workflow_edit_plan_choice(mode_value, modes,
+                                   sizeof(modes) / sizeof(modes[0]))) {
+        yyjson_doc_free(adoc);
+        return cbm_mcp_text_result("mode must be compact or detailed", true);
+    }
+
+    yyjson_val *snippets_value = yyjson_obj_get(root, "include_snippets");
+    yyjson_val *routes_value = yyjson_obj_get(root, "include_routes");
+    if ((snippets_value && !yyjson_is_bool(snippets_value)) ||
+        (routes_value && !yyjson_is_bool(routes_value))) {
+        yyjson_doc_free(adoc);
+        return cbm_mcp_text_result(
+            "include_snippets and include_routes must be booleans", true);
+    }
+    yyjson_val *related_value = yyjson_obj_get(root, "max_related_files");
+    yyjson_val *tests_value = yyjson_obj_get(root, "max_tests");
+    if ((related_value && !yyjson_is_int(related_value)) ||
+        (tests_value && !yyjson_is_int(tests_value))) {
+        yyjson_doc_free(adoc);
+        return cbm_mcp_text_result(
+            "max_related_files and max_tests must be integers", true);
+    }
+    int64_t related_limit =
+        related_value ? yyjson_get_int(related_value) : MCP_WORKFLOW_DEFAULT_LIMIT;
+    int64_t tests_limit =
+        tests_value ? yyjson_get_int(tests_value) : MCP_WORKFLOW_DEFAULT_LIMIT;
+    if (related_limit < 1 || related_limit > MCP_WORKFLOW_MAX_LIMIT ||
+        tests_limit < 1 || tests_limit > MCP_WORKFLOW_MAX_LIMIT) {
+        yyjson_doc_free(adoc);
+        return cbm_mcp_text_result(
+            "max_related_files and max_tests must be between 1 and 32", true);
+    }
+
+    char normalized_path[CBM_SZ_4K];
+    if (coverage_normalize_rel(path, false, normalized_path,
+                               sizeof(normalized_path)) != COVERAGE_PATH_OK) {
+        yyjson_doc_free(adoc);
+        return cbm_mcp_text_result(
+            "path must stay within the project and use repository-relative components",
+            true);
+    }
+
+    char *project = project_value ? get_project_arg(args) : NULL;
+    if (!project && !project_value && srv && srv->current_project) {
+        project = heap_strdup(srv->current_project);
+    }
+    cbm_store_t *store = resolve_store_read_only(srv, project);
+    if (!store) {
+        char *error = build_no_store_error(project);
+        char *response = cbm_mcp_text_result(error, true);
+        free(error);
+        free(project);
+        yyjson_doc_free(adoc);
+        return response;
+    }
+
+    cbm_workflow_evidence_gate_t gate;
+    if (cbm_workflow_evidence_gate_begin(store, project, &gate) != CBM_STORE_OK) {
+        free(project);
+        yyjson_doc_free(adoc);
+        return cbm_mcp_text_result(
+            "workflow evidence snapshot unavailable", true);
+    }
+    if (srv->evidence_snapshot_test_hook) {
+        srv->evidence_snapshot_test_hook(srv->evidence_snapshot_test_context);
+    }
+
+    const char *task_type =
+        task_value ? yyjson_get_str(task_value) : "investigate";
+    const char *mode = mode_value ? yyjson_get_str(mode_value) : "compact";
+    bool include_snippets =
+        snippets_value && yyjson_get_bool(snippets_value);
+    cbm_workflow_query_request_t request = {
+        .path = normalized_path,
+        .task_type = task_type,
+        .max_related_files = (size_t)related_limit,
+        .max_tests = (size_t)tests_limit,
+        .caller_depth = 1,
+        .include_file_aggregation = true,
+        .include_routes = routes_value && yyjson_get_bool(routes_value),
+    };
+    cbm_workflow_query_result_t query_result = {0};
+    int query_rc =
+        cbm_workflow_query_edit_plan(&gate, &request, &query_result);
+    if (query_result._private_storage && !project_value) {
+        query_result.envelope.project.resolution = "current";
+    }
+    int gate_end_rc = cbm_workflow_evidence_gate_end(&gate);
+    size_t max_bytes = strcmp(mode, "detailed") == 0
+                           ? (size_t)MCP_WORKFLOW_DETAILED_BYTES
+                           : (size_t)MCP_WORKFLOW_COMPACT_BYTES;
+    char *rendered =
+        query_result._private_storage && gate_end_rc == CBM_STORE_OK
+            ? cbm_workflow_envelope_render_compact(
+                  &query_result.envelope, max_bytes, include_snippets)
+            : NULL;
+
+    free(project);
+    yyjson_doc_free(adoc);
+    if (gate_end_rc != CBM_STORE_OK) {
+        cbm_workflow_query_result_clear(&query_result);
+        return cbm_mcp_text_result(
+            "workflow evidence snapshot could not be closed", true);
+    }
+    if (!rendered) {
+        cbm_workflow_query_result_clear(&query_result);
+        return cbm_mcp_text_result(
+            "workflow evidence could not be rendered within its byte budget", true);
+    }
+    char *response = cbm_mcp_text_result(rendered, query_rc != CBM_STORE_OK);
+    free(rendered);
+    cbm_workflow_query_result_clear(&query_result);
+    return response;
 }
 
 static void coverage_add_ranges(yyjson_mut_doc *doc, yyjson_mut_val *row, const char *detail) {
@@ -11279,7 +11520,8 @@ static char *handle_manage_adr(cbm_mcp_server_t *srv, const char *args) {
      * the UI are visible to each other (#256). */
     store_recovery_status_t recovery_status = STORE_RECOVERY_NONE;
     cbm_store_t *resolved =
-        resolve_store_internal(srv, project, mutation_held, !write_request, &recovery_status);
+        resolve_store_internal(srv, project, mutation_held, !write_request, true,
+                               &recovery_status);
     if (!resolved) {
         char *res = NULL;
         if (recovery_status == STORE_RECOVERY_BUSY) {
@@ -11338,7 +11580,8 @@ static char *handle_manage_adr(cbm_mcp_server_t *srv, const char *args) {
                     invalidate_cached_store(srv);
                     resolved = NULL;
                     store = NULL;
-                    resolved = resolve_store_internal(srv, project, true, false, NULL);
+                    resolved =
+                        resolve_store_internal(srv, project, true, false, true, NULL);
                 }
                 if (resolved) {
                     store = open_adr_store_for_write(srv, resolved, &owned_rw);
@@ -11466,6 +11709,9 @@ static char *dispatch_tool(cbm_mcp_server_t *srv, const char *tool_name, const c
     }
     if (strcmp(tool_name, "check_index_coverage") == 0) {
         return handle_check_index_coverage(srv, args_json);
+    }
+    if (strcmp(tool_name, "get_edit_plan") == 0) {
+        return handle_get_edit_plan(srv, args_json);
     }
     if (strcmp(tool_name, "delete_project") == 0) {
         return handle_delete_project(srv, args_json);
