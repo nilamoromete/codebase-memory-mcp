@@ -1643,6 +1643,8 @@ struct cbm_mcp_server {
     void *quarantine_test_context;
     cbm_mcp_command_test_hook_fn command_test_hook;
     void *command_test_context;
+    cbm_mcp_list_collection_test_hook_fn list_collection_test_hook;
+    void *list_collection_test_context;
     size_t search_output_limit_override;
     cbm_thread_t autoindex_tid;
     bool autoindex_active; /* true if auto-index thread was started */
@@ -1940,6 +1942,16 @@ void cbm_mcp_server_set_command_test_hook(cbm_mcp_server_t *srv, cbm_mcp_command
     }
     srv->command_test_hook = hook;
     srv->command_test_context = context;
+}
+
+void cbm_mcp_server_set_list_collection_test_hook(cbm_mcp_server_t *srv,
+                                                  cbm_mcp_list_collection_test_hook_fn hook,
+                                                  void *context) {
+    if (!srv) {
+        return;
+    }
+    srv->list_collection_test_hook = hook;
+    srv->list_collection_test_context = context;
 }
 
 void cbm_mcp_server_set_search_output_limit_for_test(cbm_mcp_server_t *srv, size_t limit) {
@@ -2707,7 +2719,6 @@ static int project_db_name_cmp(const void *a, const void *b) {
 /* list_projects: scan cache directory for .db files.
  * Each project is a single .db file — no central registry needed. */
 static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
-    (void)srv;
     int offset = cbm_mcp_get_int_arg(args, "offset", 0);
     int limit = cbm_mcp_get_int_arg(args, "limit", 50);
     bool include_details = cbm_mcp_get_bool_arg(args, "include_details");
@@ -2794,6 +2805,12 @@ static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
         yyjson_mut_doc_free(doc);
         return cbm_mcp_text_result(
             "{\"error\":\"out of memory while collecting indexed projects\"}", true);
+    }
+
+    /* Internal seam: tests can remove a collected database here to prove the
+     * response is serialized from one stable collection snapshot. */
+    if (srv && srv->list_collection_test_hook) {
+        srv->list_collection_test_hook(srv->list_collection_test_context);
     }
 
     if (db_count > 1) {

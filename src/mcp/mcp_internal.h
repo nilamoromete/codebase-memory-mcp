@@ -5,15 +5,19 @@
 #include "pipeline/pipeline.h" /* cbm_changed_hunk_t */
 #include "store/store.h"       /* cbm_node_t */
 
-/* White-box fault injection for deterministic cross-platform quarantine
- * safety tests. This header is internal and is not part of the MCP API. */
+/* White-box fault injection for deterministic cross-platform safety tests.
+ * This header is internal and is not part of the MCP API. */
 typedef bool (*cbm_mcp_quarantine_test_hook_fn)(void *context, const char *step);
 typedef bool (*cbm_mcp_command_test_hook_fn)(void *context, const char *command);
+typedef void (*cbm_mcp_list_collection_test_hook_fn)(void *context);
 
 void cbm_mcp_server_set_quarantine_test_hook(cbm_mcp_server_t *srv,
                                              cbm_mcp_quarantine_test_hook_fn hook, void *context);
 void cbm_mcp_server_set_command_test_hook(cbm_mcp_server_t *srv, cbm_mcp_command_test_hook_fn hook,
                                           void *context);
+void cbm_mcp_server_set_list_collection_test_hook(cbm_mcp_server_t *srv,
+                                                  cbm_mcp_list_collection_test_hook_fn hook,
+                                                  void *context);
 void cbm_mcp_server_set_search_output_limit_for_test(cbm_mcp_server_t *srv, size_t limit);
 
 /* Release only the constructor-created pristine in-memory store. Public

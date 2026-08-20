@@ -162,6 +162,12 @@ typedef struct {
     int merge_base_calls;
 } mcp_command_hook_probe_t;
 
+typedef struct {
+    const char *db_path;
+    int calls;
+    bool removed;
+} mcp_list_collection_hook_probe_t;
+
 #ifdef _WIN32
 typedef struct {
     cbm_mcp_server_t *server;
@@ -200,6 +206,15 @@ static bool mcp_command_hook_probe(void *context, const char *command) {
     }
     probe->diff_calls++;
     return true;
+}
+
+static void mcp_list_collection_hook_probe(void *context) {
+    mcp_list_collection_hook_probe_t *probe = context;
+    if (!probe || !probe->db_path) {
+        return;
+    }
+    probe->calls++;
+    probe->removed = cbm_unlink(probe->db_path) == 0;
 }
 
 #ifdef _WIN32
@@ -4383,6 +4398,52 @@ TEST(list_projects_hides_empty_shadow_before_pagination) {
     ASSERT_TRUE(shadow_hidden);
     ASSERT_TRUE(live_listed);
     ASSERT_TRUE(pagination_accurate);
+    PASS();
+}
+
+/* Listing must serialize the same database generation it validated. Removing
+ * the file after collection deterministically exposes the former double-open:
+ * total included the project, but the second open dropped it from the page. */
+TEST(list_projects_serializes_one_collection_snapshot) {
+    char cache[CBM_SZ_256];
+    snprintf(cache, sizeof(cache), "/tmp/cbm-list-snapshot-XXXXXX");
+    if (!cbm_mkdtemp(cache)) {
+        FAIL("mkdtemp failed");
+    }
+
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache_copy = saved_cache ? cbm_strdup(saved_cache) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    static const char project[] = "stable-list-snapshot1734";
+    char db_path[CBM_SZ_512];
+    snprintf(db_path, sizeof(db_path), "%s/%s.db", cache, project);
+    ASSERT_TRUE(mcp_make_valid_project_store_at(db_path, project,
+                                                "/workspace/stable-list-snapshot1734"));
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    mcp_list_collection_hook_probe_t probe = {.db_path = db_path};
+    cbm_mcp_server_set_list_collection_test_hook(srv, mcp_list_collection_hook_probe, &probe);
+    char *response = cbm_mcp_handle_tool(
+        srv, "list_projects", "{\"offset\":0,\"limit\":1,\"include_details\":true}");
+
+    bool hook_ran = probe.calls == 1 && probe.removed;
+    bool stable_entry = response && strstr(response, project) != NULL &&
+                        response_contains_json_fragment(response, "\"total\":1") &&
+                        response_contains_json_fragment(response, "\"returned\":1") &&
+                        response_contains_json_fragment(response, "\"has_more\":false") &&
+                        response_contains_json_fragment(response, "\"size_bytes\":");
+
+    free(response);
+    cbm_mcp_server_free(srv);
+    cleanup_project_db(cache, project);
+    cbm_rmdir(cache);
+    restore_cache_dir(saved_cache_copy);
+    free(saved_cache_copy);
+
+    ASSERT_TRUE(hook_ran);
+    ASSERT_TRUE(stable_entry);
     PASS();
 }
 
@@ -11698,6 +11759,7 @@ SUITE(mcp) {
     RUN_TEST(project_resolution_rejects_cached_empty_embedded_store);
     RUN_TEST(delete_project_does_not_remap_empty_alias_to_populated_candidate);
     RUN_TEST(list_projects_hides_empty_shadow_before_pagination);
+    RUN_TEST(list_projects_serializes_one_collection_snapshot);
     RUN_TEST(tool_get_architecture_path_scoping);
     RUN_TEST(tool_query_graph_missing_query);
 
