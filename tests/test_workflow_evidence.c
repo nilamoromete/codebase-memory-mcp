@@ -275,7 +275,10 @@ static bool workflow_test_hash_file(const char *path,
     while ((count = fread(buffer, 1, sizeof(buffer), file)) > 0U) {
         cbm_sha256_update(&sha, buffer, count);
     }
-    bool ok = !ferror(file) && fclose(file) == 0;
+    bool ok = !ferror(file);
+    if (fclose(file) != 0) {
+        ok = false;
+    }
     if (!ok) {
         return false;
     }
@@ -371,6 +374,35 @@ TEST(workflow_gate_keeps_unproven_generation_freshness_unknown) {
     PASS();
 }
 
+TEST(workflow_gate_matching_generation_needs_source_evidence_for_freshness) {
+    cbm_store_t *store = cbm_store_open_memory();
+    ASSERT_NOT_NULL(store);
+    ASSERT_EQ(cbm_store_upsert_project(store, "fixture", cbm_tmpdir()), CBM_STORE_OK);
+    cbm_project_t project = {0};
+    ASSERT_EQ(cbm_store_get_project(store, "fixture", &project), CBM_STORE_OK);
+    cbm_coverage_meta_t meta = {
+        .generation = project.indexed_at,
+        .index_mode = "full",
+        .recorded_at = "2026-08-20T00:00:00Z",
+        .recording_status = "complete",
+        .coverage_version = 1,
+        .hash_records_complete = true,
+    };
+    ASSERT_EQ(cbm_store_coverage_replace_ex(store, "fixture", NULL, 0, &meta),
+              CBM_STORE_OK);
+    cbm_project_free_fields(&project);
+
+    cbm_workflow_evidence_gate_t gate;
+    ASSERT_EQ(cbm_workflow_evidence_gate_begin(store, "fixture", &gate), CBM_STORE_OK);
+    ASSERT_EQ(gate.generation_state, CBM_WORKFLOW_GENERATION_MATCH);
+    ASSERT_TRUE(gate.generation_matches);
+    ASSERT_EQ((int)gate.requested, 0);
+    ASSERT_EQ(gate.freshness, CBM_WORKFLOW_FRESHNESS_UNKNOWN);
+    ASSERT_EQ(cbm_workflow_evidence_gate_end(&gate), CBM_STORE_OK);
+    cbm_store_close(store);
+    PASS();
+}
+
 SUITE(workflow_evidence) {
     RUN_TEST(workflow_envelope_keeps_risk_and_confidence_independent);
     RUN_TEST(workflow_envelope_ties_use_normalized_path_then_qualified_name);
@@ -381,5 +413,6 @@ SUITE(workflow_evidence) {
     RUN_TEST(workflow_renderer_never_exceeds_its_byte_budget);
     RUN_TEST(workflow_gate_rejects_non_normalized_relative_paths);
     RUN_TEST(workflow_gate_keeps_unproven_generation_freshness_unknown);
+    RUN_TEST(workflow_gate_matching_generation_needs_source_evidence_for_freshness);
     RUN_TEST(workflow_gate_full_coverage_requires_content_hash_match);
 }

@@ -9,6 +9,7 @@
 #include "../src/foundation/constants.h"
 #include "../src/foundation/log.h"
 #include "../src/foundation/platform.h" /* cbm_file_size */
+#include "../src/foundation/sha256.h"
 #include "../src/foundation/subprocess.h"
 #include "../src/mcp/compact_out.h"
 #include "test_framework.h"
@@ -2775,6 +2776,37 @@ static int write_coverage_meta(cbm_store_t *store, const char *generation,
     return cbm_store_coverage_replace_ex(store, "test-project", NULL, 0, &meta);
 }
 
+static bool mcp_test_hash_file(const char *path,
+                               char digest[CBM_SHA256_HEX_LEN + 1U]) {
+    FILE *file = cbm_fopen(path, "rb");
+    if (!file) {
+        return false;
+    }
+    cbm_sha256_ctx sha;
+    cbm_sha256_init(&sha);
+    unsigned char buffer[4096];
+    size_t count;
+    while ((count = fread(buffer, 1, sizeof(buffer), file)) > 0U) {
+        cbm_sha256_update(&sha, buffer, count);
+    }
+    bool ok = !ferror(file);
+    if (fclose(file) != 0) {
+        ok = false;
+    }
+    if (!ok) {
+        return false;
+    }
+    uint8_t raw[CBM_SHA256_DIGEST_LEN];
+    cbm_sha256_final(&sha, raw);
+    static const char hex[] = "0123456789abcdef";
+    for (size_t i = 0; i < CBM_SHA256_DIGEST_LEN; i++) {
+        digest[i * 2U] = hex[raw[i] >> 4U];
+        digest[i * 2U + 1U] = hex[raw[i] & 0x0fU];
+    }
+    digest[CBM_SHA256_HEX_LEN] = 0;
+    return true;
+}
+
 TEST(evidence_gate_pins_one_generation) {
     char tmp[256];
     snprintf(tmp, sizeof(tmp), "/tmp/cbm_evidence_snapshot_XXXXXX");
@@ -2811,7 +2843,9 @@ TEST(evidence_gate_pins_one_generation) {
     int64_t source_mtime_ns = ((int64_t)source_stat.st_mtim.tv_sec * (int64_t)CBM_NSEC_PER_SEC) +
                               (int64_t)source_stat.st_mtim.tv_nsec;
 #endif
-    ASSERT_EQ(cbm_store_upsert_file_hash(store, "test-project", "main.go", "fixture",
+    char source_digest[CBM_SHA256_HEX_LEN + 1U];
+    ASSERT_TRUE(mcp_test_hash_file(source_path, source_digest));
+    ASSERT_EQ(cbm_store_upsert_file_hash(store, "test-project", "main.go", source_digest,
                                          source_mtime_ns, source_stat.st_size),
               CBM_STORE_OK);
     cbm_project_t project = {0};
@@ -2882,8 +2916,10 @@ TEST(tool_check_index_coverage_accepts_truncated_ignored_catalog_for_fresh_path_
     int64_t source_mtime_ns = ((int64_t)source_stat.st_mtim.tv_sec * (int64_t)CBM_NSEC_PER_SEC) +
                               (int64_t)source_stat.st_mtim.tv_nsec;
 #endif
-    ASSERT_EQ(cbm_store_upsert_file_hash(store, "test-project", "main.go", "", source_mtime_ns,
-                                         source_stat.st_size),
+    char source_digest[CBM_SHA256_HEX_LEN + 1U];
+    ASSERT_TRUE(mcp_test_hash_file(source_path, source_digest));
+    ASSERT_EQ(cbm_store_upsert_file_hash(store, "test-project", "main.go", source_digest,
+                                         source_mtime_ns, source_stat.st_size),
               CBM_STORE_OK);
     cbm_project_t project = {0};
     ASSERT_EQ(cbm_store_get_project(store, "test-project", &project), CBM_STORE_OK);
@@ -3037,7 +3073,9 @@ TEST(evidence_gate_empty_requires_fresh_full_coverage) {
     int64_t source_mtime_ns = ((int64_t)source_stat.st_mtim.tv_sec * (int64_t)CBM_NSEC_PER_SEC) +
                               (int64_t)source_stat.st_mtim.tv_nsec;
 #endif
-    ASSERT_EQ(cbm_store_upsert_file_hash(store, "test-project", "main.go", "fixture",
+    char source_digest[CBM_SHA256_HEX_LEN + 1U];
+    ASSERT_TRUE(mcp_test_hash_file(source_path, source_digest));
+    ASSERT_EQ(cbm_store_upsert_file_hash(store, "test-project", "main.go", source_digest,
                                          source_mtime_ns, source_stat.st_size),
               CBM_STORE_OK);
     cbm_project_t project = {0};

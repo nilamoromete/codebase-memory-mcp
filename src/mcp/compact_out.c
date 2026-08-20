@@ -2,6 +2,7 @@
 #include "mcp/compact_out.h"
 
 #include <ctype.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,11 +20,20 @@ static bool sb_reserve(cbm_sb_t *sb, size_t extra) {
     if (sb->oom) {
         return false;
     }
-    if (sb->len + extra + 1 <= sb->cap) {
+    if (sb->len == SIZE_MAX || extra > SIZE_MAX - sb->len - 1U) {
+        sb->oom = true;
+        return false;
+    }
+    size_t needed = sb->len + extra + 1U;
+    if (needed <= sb->cap) {
         return true;
     }
     size_t ncap = sb->cap ? sb->cap : SB_INITIAL_CAP;
-    while (ncap < sb->len + extra + 1) {
+    while (ncap < needed) {
+        if (ncap > SIZE_MAX / 2U) {
+            ncap = needed;
+            break;
+        }
         ncap *= 2;
     }
     char *nbuf = (char *)realloc(sb->buf, ncap);
@@ -49,6 +59,16 @@ void cbm_sb_append(cbm_sb_t *sb, const char *s) {
     if (s) {
         cbm_sb_append_n(sb, s, strlen(s));
     }
+}
+
+bool cbm_sb_append_n_bounded(cbm_sb_t *sb, const char *s, size_t n, size_t max_len) {
+    if (!sb || (!s && n > 0U) || sb->oom || sb->len > max_len ||
+        n > max_len - sb->len) {
+        return false;
+    }
+    size_t before = sb->len;
+    cbm_sb_append_n(sb, s, n);
+    return !sb->oom && sb->len == before + n;
 }
 
 char *cbm_sb_finish(cbm_sb_t *sb) {

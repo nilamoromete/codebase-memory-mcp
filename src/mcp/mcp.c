@@ -4603,12 +4603,10 @@ static char *handle_check_index_coverage(cbm_mcp_server_t *srv, const char *args
                 coverage_add_row_json(doc, entries, &rows[i], NULL);
             }
             yyjson_mut_obj_add_val(doc, item, "entries", entries);
-            const char *scope_status =
-                !lookup_ok || !gate.generation_matches ? "coverage_unavailable"
-                : row_count > 0                        ? "known_gaps"
-                : strcmp(recording_status, "complete") == 0
-                    ? "no_recorded_issue"
-                    : "coverage_unavailable";
+            const char *scope_status = "coverage_unavailable";
+            if (lookup_ok && gate.generation_matches && row_count > 0) {
+                scope_status = "known_gaps";
+            }
             yyjson_mut_obj_add_str(doc, item, "status", scope_status);
             cbm_store_free_coverage(rows, row_count);
             yyjson_mut_arr_add_val(scope_results, item);

@@ -29,6 +29,8 @@ typedef struct {
 void cbm_sb_init(cbm_sb_t *sb);
 void cbm_sb_append_n(cbm_sb_t *sb, const char *s, size_t n);
 void cbm_sb_append(cbm_sb_t *sb, const char *s);
+/* Append atomically only when the resulting byte length is <= max_len. */
+bool cbm_sb_append_n_bounded(cbm_sb_t *sb, const char *s, size_t n, size_t max_len);
 /* Returns the heap buffer (caller frees) and resets sb. NULL on OOM. */
 char *cbm_sb_finish(cbm_sb_t *sb);
 void cbm_sb_free(cbm_sb_t *sb);
