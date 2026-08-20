@@ -4308,20 +4308,8 @@ TEST(list_projects_hides_empty_shadow_before_pagination) {
     ASSERT_TRUE(mcp_make_valid_project_store_at(db_path, shadow, ""));
 
     snprintf(db_path, sizeof(db_path), "%s/%s.db", cache, live_project);
-    cbm_store_t *live = cbm_store_open_path(db_path);
-    ASSERT_NOT_NULL(live);
-    ASSERT_EQ(cbm_store_upsert_project(live, live_project, "/workspace/live-list1734"),
-              CBM_STORE_OK);
-    cbm_node_t fn = {.project = live_project,
-                     .label = "Function",
-                     .name = "LiveListTarget",
-                     .qualified_name = "fixture.LiveListTarget",
-                     .file_path = "src/live.c",
-                     .start_line = 1,
-                     .end_line = 2};
-    ASSERT_GT(cbm_store_upsert_node(live, &fn), 0);
-    ASSERT_EQ(cbm_store_prepare_for_publish(live), CBM_STORE_OK);
-    cbm_store_close(live);
+    ASSERT_TRUE(mcp_make_valid_project_store_at(db_path, live_project,
+                                                "/workspace/live-list1734"));
 
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
     ASSERT_NOT_NULL(srv);
@@ -9187,7 +9175,7 @@ TEST(tool_resolve_store_by_internal_name_issue704) {
                                    "\"params\":{\"name\":\"list_projects\","
                                    "\"arguments\":{\"offset\":0,\"limit\":1}}}");
     ASSERT_NOT_NULL(page);
-    ASSERT_NOT_NULL(strstr(page, "\\\"total\\\":3"));
+    ASSERT_NOT_NULL(strstr(page, "\\\"total\\\":2"));
     ASSERT_NOT_NULL(strstr(page, "\\\"limit\\\":1"));
     ASSERT_NOT_NULL(strstr(page, "\\\"returned\\\":1"));
     ASSERT_NOT_NULL(strstr(page, "\\\"has_more\\\":true"));

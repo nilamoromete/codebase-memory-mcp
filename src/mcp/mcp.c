@@ -1976,13 +1976,16 @@ static const char *project_db_path(const char *project, char *buf, size_t bufsz)
 
 /* Read the sole INTERNAL project name from a .db file at full_path.
  * Opens the file query-mode (no create) and succeeds ONLY when the db holds
- * exactly one project row with a non-empty name — this filters ghost/empty
- * /corrupt dbs (0-byte file, missing `projects` table, or >1 row). On success
+ * exactly one primary project row with a non-empty name — this filters ghost
+ * and corrupt dbs (0-byte file, missing `projects` table, or >1 primary row).
+ * On success
  * the internal name is copied into name_out; if out_store is non-NULL the open
  * handle is transferred to the caller (who must cbm_store_close it). On failure
  * the store is always closed. Defined after is_project_db_file below. */
 static bool db_internal_project_name(const char *full_path, char *name_out, size_t name_sz,
                                      cbm_store_t **out_store);
+static bool db_live_project_name(const char *full_path, char *name_out, size_t name_sz,
+                                 cbm_store_t **out_store);
 
 /* #704 fallback: scan the cache dir for the db whose sole internal project name
  * equals `project`, returning an open store handle (caller owns it) or NULL.
@@ -2359,7 +2362,7 @@ static int collect_db_project_names(const char *dir_path, char *out, size_t out_
         char full_path[CBM_SZ_2K];
         snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, n);
         char iname[CBM_SZ_1K];
-        if (!db_internal_project_name(full_path, iname, sizeof(iname), NULL)) {
+        if (!db_live_project_name(full_path, iname, sizeof(iname), NULL)) {
             continue;
         }
         /* Element-boundary write: only emit this name if the WHOLE element —
@@ -2550,6 +2553,34 @@ static bool db_internal_project_name(const char *full_path, char *name_out, size
     return ok;
 }
 
+/* Return the primary project only when the database is also resolvable under
+ * the same empty-shadow rule used by resolve_store_internal(). A zero-node
+ * project with a real root remains live; only rootless zero-node rows are
+ * treated as shadows. */
+static bool db_live_project_name(const char *full_path, char *name_out, size_t name_sz,
+                                 cbm_store_t **out_store) {
+    if (out_store) {
+        *out_store = NULL;
+    }
+    cbm_store_t *store = NULL;
+    if (!db_internal_project_name(full_path, name_out, name_sz, &store)) {
+        return false;
+    }
+
+    cbm_project_t project = {0};
+    bool valid = cbm_store_get_project(store, name_out, &project) == CBM_STORE_OK;
+    bool live = valid && !project_record_is_empty_shadow(store, name_out, &project);
+    if (valid) {
+        cbm_project_free_fields(&project);
+    }
+    if (live && out_store) {
+        *out_store = store;
+    } else {
+        cbm_store_close(store);
+    }
+    return live;
+}
+
 /* resolve_store_fallback_scan — see forward declaration above resolve_store. */
 static cbm_store_t *resolve_store_fallback_scan(const char *project) {
     char dir_path[CBM_SZ_1K];
@@ -2570,19 +2601,10 @@ static cbm_store_t *resolve_store_fallback_scan(const char *project) {
         snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, n);
         char iname[CBM_SZ_1K];
         cbm_store_t *st = NULL;
-        if (db_internal_project_name(full_path, iname, sizeof(iname), &st)) {
+        if (db_live_project_name(full_path, iname, sizeof(iname), &st)) {
             if (strcmp(iname, project) == 0) {
-                cbm_project_t stored = {0};
-                bool valid = cbm_store_get_project(st, iname, &stored) == CBM_STORE_OK;
-                bool empty_shadow =
-                    valid && project_record_is_empty_shadow(st, iname, &stored);
-                if (valid) {
-                    cbm_project_free_fields(&stored);
-                }
-                if (valid && !empty_shadow) {
-                    found = st; /* adopt — caller takes ownership */
-                    break;
-                }
+                found = st; /* adopt — caller takes ownership */
+                break;
             }
             cbm_store_close(st);
         }
@@ -2608,7 +2630,7 @@ static void build_project_json_entry(yyjson_mut_doc *doc, yyjson_mut_val *arr, c
      * they don't appear as resolvable projects. */
     char project_name[CBM_SZ_1K];
     cbm_store_t *pstore = NULL;
-    if (!db_internal_project_name(full_path, project_name, sizeof(project_name), &pstore)) {
+    if (!db_live_project_name(full_path, project_name, sizeof(project_name), &pstore)) {
         return; /* ghost / unreadable — not a resolvable project */
     }
 
@@ -2712,6 +2734,12 @@ static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
         const char *name = entry->name;
         size_t len = strlen(name);
         if (!is_project_db_file(name, len)) {
+            continue;
+        }
+        char full_path[CBM_SZ_2K];
+        snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, name);
+        char live_name[CBM_SZ_1K];
+        if (!db_live_project_name(full_path, live_name, sizeof(live_name), NULL)) {
             continue;
         }
         if (db_count == db_cap) {
