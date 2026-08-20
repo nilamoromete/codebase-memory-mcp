@@ -230,7 +230,7 @@ static void mcp_evidence_snapshot_hook_probe(void *context) {
         return;
     }
     probe->calls++;
-    cbm_store_t *writer = cbm_store_open(probe->db_path);
+    cbm_store_t *writer = cbm_store_open_path_existing(probe->db_path);
     if (!writer) {
         return;
     }
@@ -2784,11 +2784,15 @@ TEST(evidence_gate_pins_one_generation) {
     char db_path[512];
     snprintf(root_path, sizeof(root_path), "%s/project", tmp);
     snprintf(source_path, sizeof(source_path), "%s/main.go", root_path);
-    snprintf(db_path, sizeof(db_path), "%s/evidence.db", tmp);
+    snprintf(db_path, sizeof(db_path), "%s/test-project.db", tmp);
     ASSERT_EQ(cbm_mkdir(root_path), 0);
     ASSERT_EQ(th_write_file(source_path, "package main\n"), 0);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(db_path);
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
+    ASSERT_TRUE(!saved_cache || saved_cache_copy);
+    ASSERT_EQ(cbm_setenv("CBM_CACHE_DIR", tmp, 1), 0);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new("test-project");
     ASSERT_NOT_NULL(srv);
     cbm_store_t *store = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(store);
@@ -2841,6 +2845,8 @@ TEST(evidence_gate_pins_one_generation) {
     free(inner);
     free(response);
     cbm_mcp_server_free(srv);
+    restore_cache_dir(saved_cache_copy);
+    free(saved_cache_copy);
     cbm_unlink(source_path);
     char sidecar[576];
     snprintf(sidecar, sizeof(sidecar), "%s-wal", db_path);
