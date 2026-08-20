@@ -4216,6 +4216,57 @@ TEST(project_resolution_rejects_ambiguous_populated_alias) {
     PASS();
 }
 
+/* The cached-store fast path must apply the same live-project predicate as a
+ * newly opened file-backed store. Embedded callers can set current_project
+ * before any nodes/root are present; returning that rootless zero-node row as
+ * a valid graph turns an unresolved identity into authoritative empty data. */
+TEST(project_resolution_rejects_cached_empty_embedded_store) {
+    static const char project[] = "cached-empty1734";
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *store = cbm_mcp_server_store(srv);
+    ASSERT_NOT_NULL(store);
+    ASSERT_EQ(cbm_store_upsert_project(store, project, ""), CBM_STORE_OK);
+    cbm_mcp_server_set_project(srv, project);
+
+    char *response =
+        cbm_mcp_handle_tool(srv, "index_status", "{\"project\":\"cached-empty1734\"}");
+    ASSERT_NOT_NULL(response);
+    char *inner = extract_text_content(response);
+    ASSERT_NOT_NULL(inner);
+    bool rejected = strstr(inner, "project not found") != NULL &&
+                    strstr(inner, "\"status\":\"empty\"") == NULL;
+
+    free(inner);
+    free(response);
+    cbm_mcp_server_free(srv);
+    ASSERT_TRUE(rejected);
+
+    /* Preserve the intentional zero-node case when a canonical root proves
+     * this is a real indexed project rather than a rootless shadow. */
+    srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    store = cbm_mcp_server_store(srv);
+    ASSERT_NOT_NULL(store);
+    ASSERT_EQ(cbm_store_upsert_project(store, project, "/workspace/cached-empty1734"),
+              CBM_STORE_OK);
+    cbm_mcp_server_set_project(srv, project);
+    response =
+        cbm_mcp_handle_tool(srv, "index_status", "{\"project\":\"cached-empty1734\"}");
+    ASSERT_NOT_NULL(response);
+    inner = extract_text_content(response);
+    ASSERT_NOT_NULL(inner);
+    bool rooted_zero_node_remains_live =
+        strstr(inner, "\"status\":\"empty\"") != NULL &&
+        strstr(inner, "project not found") == NULL;
+
+    free(inner);
+    free(response);
+    cbm_mcp_server_free(srv);
+    ASSERT_TRUE(rooted_zero_node_remains_live);
+    PASS();
+}
+
 /* Read-only alias convenience must never change the identity of a destructive
  * operation. When an empty exact alias shadows one populated tail candidate,
  * delete_project(alias) deletes only the exact alias database and preserves
@@ -9267,6 +9318,48 @@ TEST(tool_resolve_store_by_internal_name_issue704) {
     PASS();
 }
 
+/* Two copied databases can advertise the same internal project name while
+ * carrying different graphs. The fallback scan must inspect the full candidate
+ * set and fail closed; directory iteration order is not an identity rule. */
+TEST(tool_resolve_store_rejects_duplicate_internal_names) {
+    char cache[CBM_SZ_256];
+    snprintf(cache, sizeof(cache), "/tmp/cbm-duplicate-internal-XXXXXX");
+    if (!cbm_mkdtemp(cache)) {
+        FAIL("mkdtemp failed");
+    }
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache_copy = saved_cache ? cbm_strdup(saved_cache) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    static const char internal[] = "duplicate-internal1734";
+    ASSERT_TRUE(
+        issue704_make_db(cache, "copy-one1734.db", internal, "DuplicateInternalOne"));
+    ASSERT_TRUE(
+        issue704_make_db(cache, "copy-two1734.db", internal, "DuplicateInternalTwo"));
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    char *response = cbm_mcp_handle_tool(
+        srv, "search_graph",
+        "{\"project\":\"duplicate-internal1734\",\"name_pattern\":\"DuplicateInternal.*\"}");
+    ASSERT_NOT_NULL(response);
+    char *inner = extract_text_content(response);
+    ASSERT_NOT_NULL(inner);
+    bool rejected = strstr(inner, "project not found") != NULL &&
+                    strstr(inner, "DuplicateInternalOne") == NULL &&
+                    strstr(inner, "DuplicateInternalTwo") == NULL;
+
+    free(inner);
+    free(response);
+    cbm_mcp_server_free(srv);
+    th_rmtree(cache);
+    restore_cache_dir(saved_cache_copy);
+    free(saved_cache_copy);
+
+    ASSERT_TRUE(rejected);
+    PASS();
+}
+
 /* ── #1044: a "<name>::missed" shadow row must not hide the project ──
  *
  * The miss-graph pass inserts a second `projects` row ("<name>::missed") so
@@ -11602,6 +11695,7 @@ SUITE(mcp) {
     RUN_TEST(tool_project_arg_resolves_unique_tail_issue1025);
     RUN_TEST(project_resolution_does_not_prefer_empty_shadow);
     RUN_TEST(project_resolution_rejects_ambiguous_populated_alias);
+    RUN_TEST(project_resolution_rejects_cached_empty_embedded_store);
     RUN_TEST(delete_project_does_not_remap_empty_alias_to_populated_candidate);
     RUN_TEST(list_projects_hides_empty_shadow_before_pagination);
     RUN_TEST(tool_get_architecture_path_scoping);
@@ -11713,6 +11807,7 @@ SUITE(mcp) {
     RUN_TEST(tool_bad_project_name_no_overflow_issue235);
     RUN_TEST(tool_bad_project_error_valid_json_issue235);
     RUN_TEST(tool_resolve_store_by_internal_name_issue704);
+    RUN_TEST(tool_resolve_store_rejects_duplicate_internal_names);
     RUN_TEST(tool_list_projects_ignores_missed_shadow_issue1044);
 
     /* auto_watch gate (distilled from PR #625) */
