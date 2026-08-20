@@ -1,5 +1,6 @@
 {
   "schema_version": 1,
+  "manifest_state": "template",
   "suite_id": "workflow-evidence-public-v1",
   "arms": [
     "A",
@@ -18,6 +19,7 @@
       "language": "c",
       "category": "fix",
       "risk_class": "high",
+      "blast_radius": "medium",
       "prompt": "Change add_one to saturate at INT_MAX without changing callers, and identify the narrowest regression test.",
       "prompt_sha256": "59076438248ed48d182699e52b05f7127529a99f1330b293636e5c0da6b02caf",
       "source_paths": [
@@ -37,6 +39,7 @@
       "language": "typescript",
       "category": "refactor",
       "risk_class": "ordinary",
+      "blast_radius": "small",
       "prompt": "Rename formatUserLabel to formatDisplayName without breaking its public caller or test contract.",
       "prompt_sha256": "76a939bdba7c8e21844b14129d767fbf6da60e0da7ae14ade06ca3d0215822ea",
       "source_paths": [

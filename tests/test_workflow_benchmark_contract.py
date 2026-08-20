@@ -26,6 +26,7 @@ def _task(task_id: str = "c-caller-001") -> dict[str, object]:
         "language": "c",
         "category": "investigate",
         "risk_class": "high",
+        "blast_radius": "small",
         "prompt": prompt,
         "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
         "source_paths": ["tests/fixtures/workflow-evidence/c-small/src/math.c"],
@@ -37,6 +38,7 @@ def _task(task_id: str = "c-caller-001") -> dict[str, object]:
 def _manifest() -> dict[str, object]:
     return {
         "schema_version": 1,
+        "manifest_state": "template",
         "suite_id": "workflow-evidence-v1",
         "arms": ["A", "B", "C"],
         "model": {"name": "fixture-model", "reasoning": "fixed"},
@@ -133,6 +135,23 @@ class ManifestContractTests(unittest.TestCase):
         self.assertEqual(payload["status"], "invalid")
         self.assertIn("repository-relative", payload["error"])
 
+    def test_validate_manifest_rejects_absolute_labeled_paths(self) -> None:
+        for field in ("expected_callers", "expected_tests"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
+                manifest = _manifest()
+                tasks = manifest["tasks"]
+                assert isinstance(tasks, list)
+                task = tasks[0]
+                assert isinstance(task, dict)
+                task[field] = [r"C:\\private\\service.c"]
+                manifest_path = Path(tmp) / "manifest.json"
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+                result = _run_cli("validate-manifest", str(manifest_path))
+
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("repository-relative", json.loads(result.stderr)["error"])
+
     def test_validate_manifest_rejects_prompt_hash_mismatch(self) -> None:
         manifest = _manifest()
         tasks = manifest["tasks"]
@@ -227,6 +246,7 @@ class ManifestContractTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["suite_id"], "workflow-evidence-public-v1")
+        self.assertEqual(payload["manifest_state"], "template")
         self.assertGreaterEqual(payload["task_count"], 2)
 
     def test_canonical_test_harness_runs_workflow_benchmark_contract(self) -> None:
@@ -290,6 +310,32 @@ class RunContractTests(unittest.TestCase):
             result = _run_cli("validate-runs", str(runs_path))
         self.assertEqual(result.returncode, 2)
         self.assertIn("accounting_method", json.loads(result.stderr)["error"])
+
+    def test_validate_runs_requires_execution_budget_evidence(self) -> None:
+        records = [_run_record(arm) for arm in ("A", "B", "C")]
+        with tempfile.TemporaryDirectory() as tmp:
+            runs_path = Path(tmp) / "runs.jsonl"
+            runs_path.write_text(
+                "".join(json.dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
+            result = _run_cli("validate-runs", str(runs_path))
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("tool_calls_used", json.loads(result.stderr)["error"])
+
+    def test_provider_token_accounting_requires_usage_source(self) -> None:
+        records = [_run_record(arm) for arm in ("A", "B", "C")]
+        with tempfile.TemporaryDirectory() as tmp:
+            runs_path = Path(tmp) / "runs.jsonl"
+            runs_path.write_text(
+                "".join(json.dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
+            result = _run_cli("validate-runs", str(runs_path))
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("usage_source", json.loads(result.stderr)["error"])
 
     def test_validate_runs_rejects_primitive_latency_mismatch(self) -> None:
         records = [_run_record(arm) for arm in ("A", "B", "C")]
@@ -475,6 +521,75 @@ class RunContractTests(unittest.TestCase):
         self.assertTrue(gates["high_risk_no_regression"])
         self.assertTrue(gates["latency_within_1_2x_single_primitive"])
         self.assertTrue(summary["promotion"]["passed"])
+
+    def test_score_without_frozen_manifest_is_never_promotable(self) -> None:
+        records = [_run_record(arm) for arm in ("A", "B", "C")]
+        with tempfile.TemporaryDirectory() as tmp:
+            runs_path = Path(tmp) / "runs.jsonl"
+            summary_path = Path(tmp) / "summary.json"
+            runs_path.write_text(
+                "".join(json.dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
+            result = _run_cli(
+                "score", str(runs_path), "--output", str(summary_path)
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+
+        gates = summary["promotion"]["gates"]
+        self.assertFalse(gates["manifest_bound"])
+        self.assertFalse(gates["manifest_frozen"])
+        self.assertFalse(summary["promotion"]["passed"])
+
+    def test_score_requires_promotion_sized_stratified_task_set(self) -> None:
+        records = [_run_record(arm) for arm in ("A", "B", "C")]
+        with tempfile.TemporaryDirectory() as tmp:
+            runs_path = Path(tmp) / "runs.jsonl"
+            summary_path = Path(tmp) / "summary.json"
+            runs_path.write_text(
+                "".join(json.dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
+            result = _run_cli(
+                "score", str(runs_path), "--output", str(summary_path)
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+
+        gates = summary["promotion"]["gates"]
+        self.assertFalse(gates["task_count_between_30_and_50"])
+        self.assertFalse(gates["task_set_stratified"])
+
+    def test_high_risk_gate_rejects_file_and_blind_score_regressions(self) -> None:
+        records = [_run_record(arm) for arm in ("A", "B", "C")]
+        b_metrics = records[1]["metrics"]
+        c_metrics = records[2]["metrics"]
+        b_score = records[1]["blind_score"]
+        c_score = records[2]["blind_score"]
+        assert isinstance(b_metrics, dict)
+        assert isinstance(c_metrics, dict)
+        assert isinstance(b_score, dict)
+        assert isinstance(c_score, dict)
+        b_metrics["unnecessary_files"] = 1
+        c_metrics["unnecessary_files"] = 2
+        b_score["score"] = 90
+        c_score["score"] = 80
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runs_path = Path(tmp) / "runs.jsonl"
+            summary_path = Path(tmp) / "summary.json"
+            runs_path.write_text(
+                "".join(json.dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
+            result = _run_cli(
+                "score", str(runs_path), "--output", str(summary_path)
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+
+        self.assertFalse(summary["promotion"]["gates"]["high_risk_no_regression"])
 
     def test_score_reports_order_invariant_paired_confidence_interval(self) -> None:
         records = [_run_record(arm) for arm in ("A", "B", "C")]
