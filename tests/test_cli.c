@@ -5367,7 +5367,7 @@ TEST(cli_durable_profiles_follow_current_vendor_paths) {
     yyjson_val *kiro_profile_name =
         kiro_args && yyjson_is_arr(kiro_args) ? yyjson_arr_get(kiro_args, 1U) : NULL;
     files_ok = files_ok && profile && kiro_root && yyjson_is_obj(kiro_root) && kiro_tools &&
-               yyjson_arr_size(kiro_tools) == 14U && kiro_read && yyjson_is_str(kiro_read) &&
+               yyjson_arr_size(kiro_tools) == 16U && kiro_read && yyjson_is_str(kiro_read) &&
                strcmp(yyjson_get_str(kiro_read), "read") == 0 && include_mcp &&
                yyjson_is_bool(include_mcp) && !yyjson_get_bool(include_mcp) && kiro_server_tool &&
                yyjson_is_str(kiro_server_tool) &&
