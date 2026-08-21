@@ -288,6 +288,30 @@ TEST(agent_profiles_vibe_uses_matching_prompt_identifier_and_contract) {
     PASS();
 }
 
+TEST(agent_profiles_keep_exact_pre_workflow_contract_for_safe_migration) {
+    char *current =
+        cbm_render_graph_profile(CBM_GRAPH_DIALECT_CLAUDE, CBM_GRAPH_TIER_VERIFY,
+                                 CBM_GRAPH_ACCESS_DIRECT, NULL);
+    char *previous = cbm_render_graph_profile_pre_workflows(
+        CBM_GRAPH_DIALECT_CLAUDE, CBM_GRAPH_TIER_VERIFY, CBM_GRAPH_ACCESS_DIRECT, NULL);
+    char *previous_prompt = cbm_render_graph_prompt_pre_workflows(
+        CBM_GRAPH_TIER_VERIFY, CBM_GRAPH_ACCESS_DIRECT);
+    ASSERT_NOT_NULL(current);
+    ASSERT_NOT_NULL(previous);
+    ASSERT_NOT_NULL(previous_prompt);
+    ASSERT_TRUE(strstr(current, "get_edit_plan") != NULL);
+    ASSERT_TRUE(strstr(current, "get_change_risks") != NULL);
+    ASSERT_TRUE(strstr(previous, "check_index_coverage") != NULL);
+    ASSERT_TRUE(strstr(previous, "get_edit_plan") == NULL);
+    ASSERT_TRUE(strstr(previous, "get_change_risks") == NULL);
+    ASSERT_TRUE(strstr(previous_prompt, "get_edit_plan") == NULL);
+    ASSERT_TRUE(strstr(previous_prompt, "get_change_risks") == NULL);
+    free(current);
+    free(previous);
+    free(previous_prompt);
+    PASS();
+}
+
 TEST(agent_profiles_render_deterministically_and_reject_invalid_inputs) {
     char *first = cbm_render_graph_profile(CBM_GRAPH_DIALECT_QWEN, CBM_GRAPH_TIER_VERIFY,
                                            CBM_GRAPH_ACCESS_DIRECT, NULL);
@@ -321,5 +345,6 @@ SUITE(agent_profiles) {
     RUN_TEST(agent_profiles_kiro_is_valid_json_and_escapes_binary_path);
     RUN_TEST(agent_profiles_codex_declares_transport_and_escapes_binary_path);
     RUN_TEST(agent_profiles_vibe_uses_matching_prompt_identifier_and_contract);
+    RUN_TEST(agent_profiles_keep_exact_pre_workflow_contract_for_safe_migration);
     RUN_TEST(agent_profiles_render_deterministically_and_reject_invalid_inputs);
 }

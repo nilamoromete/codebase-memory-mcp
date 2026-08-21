@@ -5866,6 +5866,33 @@ TEST(cli_tiered_vibe_installs_matching_agent_prompt_sets) {
         free(prompt);
     }
 
+    char *previous_agent = cbm_render_graph_profile_pre_workflows(
+        CBM_GRAPH_DIALECT_VIBE, CBM_GRAPH_TIER_VERIFY, CBM_GRAPH_ACCESS_DIRECT, NULL);
+    char *previous_prompt = cbm_render_graph_prompt_pre_workflows(
+        CBM_GRAPH_TIER_VERIFY, CBM_GRAPH_ACCESS_DIRECT);
+    bool previous_owned = previous_agent && previous_prompt &&
+                          !strstr(previous_agent, "get_edit_plan") &&
+                          !strstr(previous_agent, "get_change_risks") &&
+                          !strstr(previous_prompt, "get_edit_plan") &&
+                          !strstr(previous_prompt, "get_change_risks");
+    if (previous_agent && previous_prompt) {
+        write_test_file(agent_paths[CBM_GRAPH_TIER_VERIFY], previous_agent);
+        write_test_file(prompt_paths[CBM_GRAPH_TIER_VERIFY], previous_prompt);
+    }
+    free(previous_agent);
+    free(previous_prompt);
+    int upgrade_rc =
+        cbm_install_agent_configs(tmpdir, "/opt/codebase-memory-mcp", false, false);
+    char *upgraded_agent = read_test_file_alloc(agent_paths[CBM_GRAPH_TIER_VERIFY]);
+    char *upgraded_prompt = read_test_file_alloc(prompt_paths[CBM_GRAPH_TIER_VERIFY]);
+    bool upgraded = previous_owned && upgrade_rc == 0 && upgraded_agent && upgraded_prompt &&
+                    strstr(upgraded_agent, "get_edit_plan") &&
+                    strstr(upgraded_agent, "get_change_risks") &&
+                    strstr(upgraded_prompt, "get_edit_plan before proposing an edit") &&
+                    strstr(upgraded_prompt, "get_change_risks before declaring completion");
+    free(upgraded_agent);
+    free(upgraded_prompt);
+
     char *argv[] = {"uninstall", "--yes"};
     int uninstall_rc = cli_test_cmd_uninstall(2, argv);
     struct stat state;
@@ -5878,8 +5905,8 @@ TEST(cli_tiered_vibe_installs_matching_agent_prompt_sets) {
     restore_test_env("PATH", saved_path);
     restore_test_env("VIBE_HOME", saved_vibe);
     test_rmdir_r(tmpdir);
-    if (!plan_ok || !installed || !removed)
-        FAIL("Vibe must install and remove matching Scout, Verify, and Auditor agent/prompt pairs");
+    if (!plan_ok || !installed || !upgraded || !removed)
+        FAIL("Vibe must migrate, install, and remove matching tiered agent/prompt pairs");
     PASS();
 }
 

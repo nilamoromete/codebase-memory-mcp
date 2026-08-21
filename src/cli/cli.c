@@ -1305,6 +1305,8 @@ static const char skill_content[] =
     "| Dead code | `search_graph(max_degree=0, exclude_entry_points=true)` |\n"
     "| Cross-service edges | `query_graph` with Cypher |\n"
     "| Impact of local changes | `detect_changes()` |\n"
+    "| Before editing a file | `get_edit_plan(path=\"...\")` |\n"
+    "| Before completion | `get_change_risks(diff_mode=\"working_tree\")` |\n"
     "| Risk-classified trace | `trace_path(risk_labels=true)` |\n"
     "| Text search | `search_code` or Grep |\n"
     "\n"
@@ -1318,6 +1320,13 @@ static const char skill_content[] =
     "1. `search_graph(name_pattern=\".*FuncName.*\")` — discover exact name\n"
     "2. `trace_path(function_name=\"FuncName\", direction=\"both\", depth=3)` — trace\n"
     "3. `detect_changes()` — map git diff to affected symbols\n"
+    "\n"
+    "## Change Workflow\n"
+    "- Before editing a file, call `get_edit_plan` for the primary target. Use its affected "
+    "symbols, related files, tests, and regression risks to bound the change.\n"
+    "- Before completion, call `get_change_risks` with explicit edited paths or "
+    "`diff_mode=\"working_tree\"`. Treat its evidence as a verification plan; the tool does not "
+    "run tests or mutate the repository.\n"
     "\n"
     "## Evidence Tiers\n"
     "- **Scout (Tier 1):** fast positive lookup with few graph calls and targeted source checks. "
@@ -1358,11 +1367,12 @@ static const char skill_content[] =
     "- High fan-in: `search_graph(min_degree=10, relationship=\"CALLS\", "
     "direction=\"inbound\")`\n"
     "\n"
-    "## 15 MCP Tools\n"
+    "## 17 MCP Tools\n"
     "`index_repository`, `index_status`, `list_projects`, `delete_project`,\n"
     "`search_graph`, `search_code`, `trace_path`, `detect_changes`,\n"
     "`query_graph`, `get_graph_schema`, `get_code_snippet`, `get_architecture`,\n"
-    "`check_index_coverage`, `manage_adr`, `ingest_traces`\n"
+    "`check_index_coverage`, `get_edit_plan`, `get_change_risks`, `manage_adr`, "
+    "`ingest_traces`\n"
     "\n"
     "## Edge Types\n"
     "CALLS, HTTP_CALLS, ASYNC_CALLS, DATA_FLOWS, IMPORTS, DEFINES, DEFINES_METHOD,\n"
@@ -1399,6 +1409,12 @@ static const char codex_instructions_content[] =
     "- `get_code_snippet` — read function source code\n"
     "- `query_graph` — run Cypher queries for complex patterns\n"
     "- `get_architecture` — high-level project summary\n"
+    "- `get_edit_plan` — compose pre-edit context and risk for a target file\n"
+    "- `get_change_risks` — verify post-edit blast radius from paths or the working tree\n"
+    "\n"
+    "Before editing a file, call `get_edit_plan` for the primary target.\n"
+    "Before completion, call `get_change_risks` for the edited paths or working tree, then run "
+    "the recommended tests.\n"
     "\n"
     "Always prefer graph tools over grep for code discovery.\n";
 
@@ -2892,12 +2908,14 @@ static const char agent_instructions_content[] =
     "ALWAYS prefer MCP graph tools over grep/glob/file-search for code discovery.\n"
     "\n"
     "### Priority Order\n"
-    "1. `search_graph` — find functions, classes, routes, variables by pattern\n"
-    "2. `trace_path` — trace who calls a function or what it calls\n"
-    "3. `get_code_snippet` — read specific function/class source code\n"
-    "4. `check_index_coverage` — validate candidate paths and missed ranges before claims\n"
-    "5. `query_graph` — run Cypher queries for complex patterns\n"
-    "6. `get_architecture` — high-level project summary\n"
+    "1. `get_edit_plan` — before editing a file, compose its context, blast radius, and tests\n"
+    "2. `search_graph` — find functions, classes, routes, variables by pattern\n"
+    "3. `trace_path` — trace who calls a function or what it calls\n"
+    "4. `get_code_snippet` — read specific function/class source code\n"
+    "5. `check_index_coverage` — validate candidate paths and missed ranges before claims\n"
+    "6. `get_change_risks` — before completion, verify edited paths or the working tree\n"
+    "7. `query_graph` — run Cypher queries for complex patterns\n"
+    "8. `get_architecture` — high-level project summary\n"
     "\n"
     "### Evidence tiers\n"
     "- **Scout (Tier 1):** quick positive lookup with few calls and targeted source checks. Mark "
@@ -2913,6 +2931,9 @@ static const char agent_instructions_content[] =
     "evidence path. Add relevant scopes for negative or exhaustive claims. A clean result means no "
     "recorded gap, not proof of completeness. For partial, skipped, excluded, stale, pending, or "
     "unknown coverage, read/grep the reported ranges or scope before relying on graph results.\n"
+    "- Before editing a file, call `get_edit_plan` for the primary target. Before completion, "
+    "call `get_change_risks` with every edited path or `diff_mode=\"working_tree\"`, then run "
+    "the recommended verification.\n"
     "\n"
     "### When to fall back to grep/glob\n"
     "- Searching for string literals, error messages, config values\n"
@@ -3299,19 +3320,25 @@ static const char aider_instructions_content[] =
     "ALWAYS prefer these commands over grep/glob/file-search for code discovery.\n"
     "\n"
     "## Priority Order (CLI form)\n"
-    "1. Find functions/classes/routes:\n"
+    "1. Before editing a file:\n"
+    "   codebase-memory-mcp cli get_edit_plan "
+    "'{\"project\":\"<name>\",\"path\":\"<repo-relative-path>\",\"mode\":\"compact\"}'\n"
+    "2. Find functions/classes/routes:\n"
     "   codebase-memory-mcp cli search_graph "
     "'{\"project\":\"<name>\",\"name_pattern\":\".*Foo.*\"}'\n"
-    "2. Who calls X / what does X call:\n"
+    "3. Who calls X / what does X call:\n"
     "   codebase-memory-mcp cli trace_path "
     "'{\"project\":\"<name>\",\"function_name\":\"Foo\",\"direction\":\"both\"}'\n"
-    "3. Read a specific function/class:\n"
+    "4. Read a specific function/class:\n"
     "   codebase-memory-mcp cli get_code_snippet "
     "'{\"project\":\"<name>\",\"qualified_name\":\"<qn>\"}'\n"
-    "4. Complex patterns (Cypher):\n"
+    "5. Complex patterns (Cypher):\n"
     "   codebase-memory-mcp cli query_graph '{\"project\":\"<name>\",\"query\":\"MATCH ...\"}'\n"
-    "5. Project overview:\n"
+    "6. Project overview:\n"
     "   codebase-memory-mcp cli get_architecture '{\"project\":\"<name>\"}'\n"
+    "7. Before completion:\n"
+    "   codebase-memory-mcp cli get_change_risks "
+    "'{\"project\":\"<name>\",\"diff_mode\":\"working_tree\"}'\n"
     "\n"
     "First use in a repo: codebase-memory-mcp cli index_repository '{\"repo_path\":\"<abs "
     "path>\"}'\n"
@@ -7897,14 +7924,24 @@ static void install_tiered_agent_profiles(cbm_tiered_profile_set_t profiles, boo
             access == CBM_GRAPH_ACCESS_DIRECT ? CBM_GRAPH_ACCESS_HANDOFF : CBM_GRAPH_ACCESS_DIRECT;
         char *alternate = cbm_render_graph_profile(profiles.dialect, tier, alternate_access,
                                                    profiles.binary_path);
+        char *previous = cbm_render_graph_profile_pre_workflows(
+            profiles.dialect, tier, access, profiles.binary_path);
+        char *previous_alternate = cbm_render_graph_profile_pre_workflows(
+            profiles.dialect, tier, alternate_access, profiles.binary_path);
         char *codex_rc1 =
             profiles.dialect == CBM_GRAPH_DIALECT_CODEX && access == CBM_GRAPH_ACCESS_DIRECT
                 ? cbm_render_graph_profile_codex_rc1(tier)
                 : NULL;
-        const char *released[3];
+        const char *released[5];
         size_t released_count = 0U;
         if (alternate) {
             released[released_count++] = alternate;
+        }
+        if (previous) {
+            released[released_count++] = previous;
+        }
+        if (previous_alternate) {
+            released[released_count++] = previous_alternate;
         }
         if (codex_rc1) {
             released[released_count++] = codex_rc1;
@@ -7916,6 +7953,8 @@ static void install_tiered_agent_profiles(cbm_tiered_profile_set_t profiles, boo
                          ? cbm_text_migrate_owned_document(path, current, released, released_count)
                          : CLI_ERR;
         free(codex_rc1);
+        free(previous_alternate);
+        free(previous);
         free(alternate);
         free(current);
         if (result != CLI_OK) {
@@ -7952,14 +7991,24 @@ static void uninstall_tiered_agent_profiles(cbm_tiered_profile_set_t profiles, b
             access == CBM_GRAPH_ACCESS_DIRECT ? CBM_GRAPH_ACCESS_HANDOFF : CBM_GRAPH_ACCESS_DIRECT;
         char *alternate = cbm_render_graph_profile(profiles.dialect, tier, alternate_access,
                                                    profiles.binary_path);
+        char *previous = cbm_render_graph_profile_pre_workflows(
+            profiles.dialect, tier, access, profiles.binary_path);
+        char *previous_alternate = cbm_render_graph_profile_pre_workflows(
+            profiles.dialect, tier, alternate_access, profiles.binary_path);
         char *codex_rc1 =
             profiles.dialect == CBM_GRAPH_DIALECT_CODEX && access == CBM_GRAPH_ACCESS_DIRECT
                 ? cbm_render_graph_profile_codex_rc1(tier)
                 : NULL;
-        const char *released[3];
+        const char *released[5];
         size_t released_count = 0U;
         if (alternate) {
             released[released_count++] = alternate;
+        }
+        if (previous) {
+            released[released_count++] = previous;
+        }
+        if (previous_alternate) {
+            released[released_count++] = previous_alternate;
         }
         if (codex_rc1) {
             released[released_count++] = codex_rc1;
@@ -7969,6 +8018,8 @@ static void uninstall_tiered_agent_profiles(cbm_tiered_profile_set_t profiles, b
         }
         int result = cbm_text_remove_owned_document_any(path, current, released, released_count);
         free(codex_rc1);
+        free(previous_alternate);
+        free(previous);
         free(alternate);
         free(current);
         if (result < CLI_OK) {
@@ -8005,11 +8056,19 @@ static void install_tiered_profile_prompts(const char *label, const char *verify
             record_agent_config_error(false, label, "prompt_render", path);
             continue;
         }
-        const char *released[] = {legacy_verify_content};
-        size_t released_count = tier == CBM_GRAPH_TIER_VERIFY && legacy_verify_content ? 1U : 0U;
+        char *previous = cbm_render_graph_prompt_pre_workflows(tier, access);
+        const char *released[2];
+        size_t released_count = 0U;
+        if (previous) {
+            released[released_count++] = previous;
+        }
+        if (tier == CBM_GRAPH_TIER_VERIFY && legacy_verify_content) {
+            released[released_count++] = legacy_verify_content;
+        }
         int result = prepare_config_parent(path)
                          ? cbm_text_migrate_owned_document(path, current, released, released_count)
                          : CLI_ERR;
+        free(previous);
         free(current);
         if (result != CLI_OK) {
             if (result > CLI_OK) {
@@ -8042,9 +8101,17 @@ static void uninstall_tiered_profile_prompts(const char *label, const char *veri
             record_agent_config_error(true, label, "prompt_render", path);
             continue;
         }
-        const char *released[] = {legacy_verify_content};
-        size_t released_count = tier == CBM_GRAPH_TIER_VERIFY && legacy_verify_content ? 1U : 0U;
+        char *previous = cbm_render_graph_prompt_pre_workflows(tier, access);
+        const char *released[2];
+        size_t released_count = 0U;
+        if (previous) {
+            released[released_count++] = previous;
+        }
+        if (tier == CBM_GRAPH_TIER_VERIFY && legacy_verify_content) {
+            released[released_count++] = legacy_verify_content;
+        }
         int result = cbm_text_remove_owned_document_any(path, current, released, released_count);
+        free(previous);
         free(current);
         if (result < CLI_OK) {
             record_agent_config_error(true, label, "prompt_uninstall", path);
