@@ -273,7 +273,7 @@ static void mcp_worktree_snapshot_hook_probe(void *context) {
     probe->calls++;
     FILE *file = cbm_fopen(probe->path, "wb");
     if (file) {
-        bool wrote = fputs("package main\n", file) > 0;
+        bool wrote = fputs("package main\n", file) != EOF;
         bool closed = fclose(file) == 0;
         probe->created = wrote && closed;
     }
@@ -3096,22 +3096,12 @@ TEST(evidence_gate_pins_one_generation) {
     ASSERT_EQ(cbm_store_upsert_project(store, "test-project", root_path), CBM_STORE_OK);
     cbm_mcp_server_set_project(srv, "test-project");
 
-    struct stat source_stat;
-    ASSERT_EQ(stat(source_path, &source_stat), 0);
-#ifdef __APPLE__
-    int64_t source_mtime_ns =
-        ((int64_t)source_stat.st_mtimespec.tv_sec * (int64_t)CBM_NSEC_PER_SEC) +
-        (int64_t)source_stat.st_mtimespec.tv_nsec;
-#elif defined(_WIN32)
-    int64_t source_mtime_ns = (int64_t)source_stat.st_mtime * (int64_t)CBM_NSEC_PER_SEC;
-#else
-    int64_t source_mtime_ns = ((int64_t)source_stat.st_mtim.tv_sec * (int64_t)CBM_NSEC_PER_SEC) +
-                              (int64_t)source_stat.st_mtim.tv_nsec;
-#endif
+    cbm_path_info_t source_info;
+    ASSERT_EQ(cbm_path_info_utf8(source_path, &source_info), 0);
     char source_digest[CBM_SHA256_HEX_LEN + 1U];
     ASSERT_TRUE(mcp_test_hash_file(source_path, source_digest));
     ASSERT_EQ(cbm_store_upsert_file_hash(store, "test-project", "main.go", source_digest,
-                                         source_mtime_ns, source_stat.st_size),
+                                         source_info.mtime_ns, source_info.size),
               CBM_STORE_OK);
     cbm_project_t project = {0};
     ASSERT_EQ(cbm_store_get_project(store, "test-project", &project), CBM_STORE_OK);
@@ -3169,22 +3159,12 @@ TEST(tool_check_index_coverage_accepts_truncated_ignored_catalog_for_fresh_path_
     ASSERT_NOT_NULL(store);
     char source_path[512];
     snprintf(source_path, sizeof(source_path), "%s/project/main.go", tmp);
-    struct stat source_stat;
-    ASSERT_EQ(stat(source_path, &source_stat), 0);
-#ifdef __APPLE__
-    int64_t source_mtime_ns =
-        ((int64_t)source_stat.st_mtimespec.tv_sec * (int64_t)CBM_NSEC_PER_SEC) +
-        (int64_t)source_stat.st_mtimespec.tv_nsec;
-#elif defined(_WIN32)
-    int64_t source_mtime_ns = (int64_t)source_stat.st_mtime * (int64_t)CBM_NSEC_PER_SEC;
-#else
-    int64_t source_mtime_ns = ((int64_t)source_stat.st_mtim.tv_sec * (int64_t)CBM_NSEC_PER_SEC) +
-                              (int64_t)source_stat.st_mtim.tv_nsec;
-#endif
+    cbm_path_info_t source_info;
+    ASSERT_EQ(cbm_path_info_utf8(source_path, &source_info), 0);
     char source_digest[CBM_SHA256_HEX_LEN + 1U];
     ASSERT_TRUE(mcp_test_hash_file(source_path, source_digest));
     ASSERT_EQ(cbm_store_upsert_file_hash(store, "test-project", "main.go", source_digest,
-                                         source_mtime_ns, source_stat.st_size),
+                                         source_info.mtime_ns, source_info.size),
               CBM_STORE_OK);
     cbm_project_t project = {0};
     ASSERT_EQ(cbm_store_get_project(store, "test-project", &project), CBM_STORE_OK);
@@ -3326,22 +3306,12 @@ TEST(evidence_gate_empty_requires_fresh_full_coverage) {
     ASSERT_NOT_NULL(store);
     char source_path[512];
     snprintf(source_path, sizeof(source_path), "%s/project/main.go", tmp);
-    struct stat source_stat;
-    ASSERT_EQ(stat(source_path, &source_stat), 0);
-#ifdef __APPLE__
-    int64_t source_mtime_ns =
-        ((int64_t)source_stat.st_mtimespec.tv_sec * (int64_t)CBM_NSEC_PER_SEC) +
-        (int64_t)source_stat.st_mtimespec.tv_nsec;
-#elif defined(_WIN32)
-    int64_t source_mtime_ns = (int64_t)source_stat.st_mtime * (int64_t)CBM_NSEC_PER_SEC;
-#else
-    int64_t source_mtime_ns = ((int64_t)source_stat.st_mtim.tv_sec * (int64_t)CBM_NSEC_PER_SEC) +
-                              (int64_t)source_stat.st_mtim.tv_nsec;
-#endif
+    cbm_path_info_t source_info;
+    ASSERT_EQ(cbm_path_info_utf8(source_path, &source_info), 0);
     char source_digest[CBM_SHA256_HEX_LEN + 1U];
     ASSERT_TRUE(mcp_test_hash_file(source_path, source_digest));
     ASSERT_EQ(cbm_store_upsert_file_hash(store, "test-project", "main.go", source_digest,
-                                         source_mtime_ns, source_stat.st_size),
+                                         source_info.mtime_ns, source_info.size),
               CBM_STORE_OK);
     cbm_project_t project = {0};
     ASSERT_EQ(cbm_store_get_project(store, "test-project", &project), CBM_STORE_OK);
@@ -9099,7 +9069,7 @@ TEST(tool_get_change_risks_working_tree_handles_clean_and_untracked_read_only) {
 
     FILE *untracked = cbm_fopen(untracked_path, "wb");
     ASSERT_NOT_NULL(untracked);
-    ASSERT_GT(fputs("package main\n", untracked), 0);
+    ASSERT_TRUE(fputs("package main\n", untracked) != EOF);
     ASSERT_EQ(fclose(untracked), 0);
 
     char *dirty_response = cbm_mcp_handle_tool(srv, "get_change_risks", args);
