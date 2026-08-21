@@ -56,7 +56,7 @@
       "featureList": [
         "Indexes 158 programming languages via vendored tree-sitter grammars",
         "Hybrid LSP semantic type resolution for Python, TypeScript/JavaScript, PHP, C#, Go, C/C++, Java, Kotlin, and Rust",
-        "15 MCP tools for structural search, call-path tracing, targeted coverage checks, and Cypher graph queries",
+        "17 MCP tools for structural search, call-path tracing, evidence-backed edit planning and change-risk checks, targeted coverage checks, and Cypher graph queries",
         "Semantic vector code search via bundled nomic-embed-code embeddings (no API key, fully local)",
         "Semantic graph edges (SEMANTICALLY_RELATED) and near-clone detection (SIMILAR_TO, MinHash + LSH)",
         "Cross-service linking for HTTP, gRPC, GraphQL, tRPC, and pub/sub channels with confidence scoring",
@@ -558,7 +558,9 @@
         <p class="muted">
             Documented custom-agent formats receive three exact-owned evidence tiers: Scout for narrow provisional
             discovery, Verify as the task-directed default, and Auditor for bounded, paginated, current-generation
-            verification. Every direct tier calls <code>check_index_coverage</code> for cited paths and relevant scopes,
+            verification. Every direct tier calls <code>get_edit_plan</code> before proposing an edit and
+            <code>check_index_coverage</code> for cited paths and relevant scopes; Verify and Auditor call
+            <code>get_change_risks</code> before declaring completion,
             then reads flagged ranges or skipped files directly. Kiro and Junie use positive-allowlist
             <code>--tool-profile scout</code> and <code>--tool-profile analysis</code> server surfaces;
             Junie selects dedicated named aliases because its subagent schema filters by server.
@@ -739,8 +741,8 @@
                 <p>The optional UI variant adds one verified, content-addressed frontend pack and serves an interactive 3D graph at <code>localhost:9749</code> to explore nodes, edges, and clusters visually.</p>
             </div>
             <div class="feature">
-                <h3>15 MCP tools</h3>
-                <p><code>search_graph</code>, <code>trace_path</code>, <code>detect_changes</code>, <code>query_graph</code> (Cypher), <code>get_architecture</code>, <code>get_code_snippet</code>, <code>check_index_coverage</code>, <code>manage_adr</code>, and 7 more.</p>
+                <h3>17 MCP tools</h3>
+                <p><code>search_graph</code>, <code>trace_path</code>, <code>detect_changes</code>, <code>query_graph</code> (Cypher), <code>get_architecture</code>, <code>get_code_snippet</code>, <code>check_index_coverage</code>, <code>get_edit_plan</code>, <code>get_change_risks</code>, <code>manage_adr</code>, and 7 more.</p>
             </div>
             <div class="feature">
                 <h3>Cypher graph queries</h3>
