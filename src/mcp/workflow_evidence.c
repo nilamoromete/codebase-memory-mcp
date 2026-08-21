@@ -18,18 +18,6 @@
  * implementation avoids weakening symlink and Windows case-folding checks. */
 bool cbm_path_within_root(const char *root_path, const char *abs_path);
 
-static int64_t workflow_stat_mtime_ns(const struct stat *st) {
-#ifdef __APPLE__
-    return ((int64_t)st->st_mtimespec.tv_sec * (int64_t)CBM_NSEC_PER_SEC) +
-           (int64_t)st->st_mtimespec.tv_nsec;
-#elif defined(_WIN32)
-    return (int64_t)st->st_mtime * (int64_t)CBM_NSEC_PER_SEC;
-#else
-    return ((int64_t)st->st_mtim.tv_sec * (int64_t)CBM_NSEC_PER_SEC) +
-           (int64_t)st->st_mtim.tv_nsec;
-#endif
-}
-
 static bool workflow_rel_path_is_normalized(const char *path) {
     if (!path || !path[0] || path[0] == '/' || path[0] == '\\' ||
         (isalpha((unsigned char)path[0]) && path[1] == ':')) {
@@ -162,12 +150,18 @@ static const char *workflow_path_freshness(cbm_workflow_evidence_gate_t *gate,
         return "outside_project";
     }
 
-    errno = 0;
-    struct stat st;
-    if (stat(abs_path, &st) != 0) {
-        if (errno == ENOENT || errno == ENOTDIR) {
+    cbm_path_info_t source_info;
+    if (cbm_path_info_utf8(abs_path, &source_info) != 0) {
+        errno = 0;
+        struct stat missing_probe;
+        if (stat(abs_path, &missing_probe) != 0 &&
+            (errno == ENOENT || errno == ENOTDIR)) {
             return "missing";
         }
+        *lookup_ok = false;
+        return "unavailable";
+    }
+    if (!source_info.is_regular || source_info.is_symlink) {
         *lookup_ok = false;
         return "unavailable";
     }
@@ -181,7 +175,7 @@ static const char *workflow_path_freshness(cbm_workflow_evidence_gate_t *gate,
         *lookup_ok = false;
         return "unavailable";
     }
-    bool matches = hash.mtime_ns == workflow_stat_mtime_ns(&st) && hash.size == st.st_size;
+    bool matches = hash.mtime_ns == source_info.mtime_ns && hash.size == source_info.size;
     *metadata_matches = matches;
     if (matches && gate->have_coverage_meta && gate->coverage_meta.hash_records_complete) {
         if (!workflow_sha256_is_valid(hash.sha256)) {
