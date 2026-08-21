@@ -112,15 +112,24 @@ TEST(agent_profiles_tiers_encode_distinct_evidence_budgets) {
                                            CBM_GRAPH_ACCESS_DIRECT, NULL);
     int valid = scout && verify && audit && strstr(scout, "3-4 narrow graph calls") &&
                 strstr(scout, "positive, provisional") && strstr(scout, "all/none claims") &&
+                strstr(scout, "mcp__codebase-memory-mcp__get_edit_plan") &&
+                !strstr(scout, "mcp__codebase-memory-mcp__get_change_risks") &&
+                strstr(scout, "get_edit_plan before proposing an edit") &&
                 !strstr(scout, "mcp__codebase-memory-mcp__query_graph") &&
                 !strstr(scout, "mcp__codebase-memory-mcp__detect_changes") &&
                 strstr(verify, "default tier") && strstr(verify, "task-directed evidence") &&
                 strstr(verify, "scope coverage before negative claims") &&
+                strstr(verify, "mcp__codebase-memory-mcp__get_edit_plan") &&
+                strstr(verify, "mcp__codebase-memory-mcp__get_change_risks") &&
+                strstr(verify, "get_change_risks before declaring completion") &&
                 strstr(verify, "mcp__codebase-memory-mcp__query_graph") &&
                 strstr(verify, "mcp__codebase-memory-mcp__detect_changes") &&
                 strstr(audit, "bounded scope") && strstr(audit, "current graph generation") &&
                 strstr(audit, "complete relevant pagination") && strstr(audit, "scope coverage") &&
                 strstr(audit, "source fallback") &&
+                strstr(audit, "mcp__codebase-memory-mcp__get_edit_plan") &&
+                strstr(audit, "mcp__codebase-memory-mcp__get_change_risks") &&
+                strstr(audit, "get_change_risks before declaring completion") &&
                 strstr(audit, "mcp__codebase-memory-mcp__query_graph") &&
                 strstr(audit, "mcp__codebase-memory-mcp__detect_changes");
     free(scout);

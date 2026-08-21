@@ -2392,7 +2392,11 @@ TEST(cli_skill_files_content) {
     /* Reference capabilities */
     ASSERT(strstr(sk[0].content, "query_graph") != NULL);
     ASSERT(strstr(sk[0].content, "Cypher") != NULL);
-    ASSERT(strstr(sk[0].content, "15 MCP Tools") != NULL);
+    ASSERT(strstr(sk[0].content, "17 MCP Tools") != NULL);
+    ASSERT(strstr(sk[0].content, "get_edit_plan") != NULL);
+    ASSERT(strstr(sk[0].content, "get_change_risks") != NULL);
+    ASSERT(strstr(sk[0].content, "Before editing a file") != NULL);
+    ASSERT(strstr(sk[0].content, "Before completion") != NULL);
 
     /* Gotchas section */
     ASSERT(strstr(sk[0].content, "Gotchas") != NULL);
@@ -2406,6 +2410,10 @@ TEST(cli_codex_instructions) {
     ASSERT_NOT_NULL(instr);
     ASSERT(strstr(instr, "Codebase Knowledge Graph") != NULL);
     ASSERT(strstr(instr, "trace_path") != NULL);
+    ASSERT(strstr(instr, "get_edit_plan") != NULL);
+    ASSERT(strstr(instr, "get_change_risks") != NULL);
+    ASSERT(strstr(instr, "Before editing a file") != NULL);
+    ASSERT(strstr(instr, "Before completion") != NULL);
     PASS();
 }
 
@@ -10912,6 +10920,10 @@ TEST(cli_aider_instructions_are_cli_form_issue1032) {
     ASSERT(strstr(content, "codebase-memory-mcp cli search_graph") != NULL);
     ASSERT(strstr(content, "codebase-memory-mcp cli trace_path") != NULL);
     ASSERT(strstr(content, "codebase-memory-mcp cli index_repository") != NULL);
+    ASSERT(strstr(content, "codebase-memory-mcp cli get_edit_plan") != NULL);
+    ASSERT(strstr(content, "codebase-memory-mcp cli get_change_risks") != NULL);
+    ASSERT(strstr(content, "Before editing a file") != NULL);
+    ASSERT(strstr(content, "Before completion") != NULL);
     /* ...and no bare MCP-call syntax remains to mislead the model. */
     ASSERT_NULL(strstr(content, "search_graph(name_pattern"));
     /* States the constraint explicitly. */
@@ -11066,6 +11078,10 @@ TEST(cli_agent_instructions_content) {
     ASSERT(strstr(instr, "Verify (Tier 2, default)") != NULL);
     ASSERT(strstr(instr, "Auditor (Tier 3)") != NULL);
     ASSERT(strstr(instr, "check_index_coverage") != NULL);
+    ASSERT(strstr(instr, "get_edit_plan") != NULL);
+    ASSERT(strstr(instr, "get_change_risks") != NULL);
+    ASSERT(strstr(instr, "Before editing a file") != NULL);
+    ASSERT(strstr(instr, "Before completion") != NULL);
     ASSERT(strstr(instr, "missed-coverage range") != NULL);
     ASSERT(strstr(instr, "must not call or claim MCP access") != NULL);
     ASSERT(strstr(instr, "# Codebase Memory\n") != NULL);
