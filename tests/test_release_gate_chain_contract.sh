@@ -23,12 +23,16 @@ WF="$ROOT/.github/workflows/release.yml"
 BUILD_WF="$ROOT/.github/workflows/_build.yml"
 DRY_WF="$ROOT/.github/workflows/dry-run.yml"
 SOAK_WF="$ROOT/.github/workflows/_soak.yml"
+SECURITY_WF="$ROOT/.github/workflows/_security.yml"
+CODEQL_WF="$ROOT/.github/workflows/codeql.yml"
 [ -f "$WF" ] || { echo "FAIL: $WF not found" >&2; exit 2; }
 [ -f "$BUILD_WF" ] || { echo "FAIL: $BUILD_WF not found" >&2; exit 2; }
 [ -f "$DRY_WF" ] || { echo "FAIL: $DRY_WF not found" >&2; exit 2; }
 [ -f "$SOAK_WF" ] || { echo "FAIL: $SOAK_WF not found" >&2; exit 2; }
+[ -f "$SECURITY_WF" ] || { echo "FAIL: $SECURITY_WF not found" >&2; exit 2; }
+[ -f "$CODEQL_WF" ] || { echo "FAIL: $CODEQL_WF not found" >&2; exit 2; }
 
-python3 - "$WF" "$BUILD_WF" "$DRY_WF" "$SOAK_WF" <<'PY'
+python3 - "$WF" "$BUILD_WF" "$DRY_WF" "$SOAK_WF" "$SECURITY_WF" "$CODEQL_WF" <<'PY'
 import pathlib
 import re
 import sys
@@ -37,6 +41,8 @@ text = pathlib.Path(sys.argv[1]).read_text()
 build_text = pathlib.Path(sys.argv[2]).read_text()
 dry_text = pathlib.Path(sys.argv[3]).read_text()
 soak_text = pathlib.Path(sys.argv[4]).read_text()
+security_text = pathlib.Path(sys.argv[5]).read_text()
+codeql_text = pathlib.Path(sys.argv[6]).read_text()
 
 # Slice the file into top-level job blocks: two-space indented "name:".
 blocks, current, name = {}, [], None
@@ -266,6 +272,50 @@ if "virustotal" in dry_jobs:
     failures.append(
         "dry-run: obsolete post-smoke virustotal job must be removed; candidate\n"
         "      scanning/selection belongs before smoke inside the build job.")
+
+# A workflow_dispatch on a feature branch has no matching push/PR CodeQL run.
+# Dry-run must therefore execute CodeQL inside the reusable security workflow;
+# merely polling codeql.yml makes every manual branch run time out after 45 min.
+security_jobs = workflow_jobs(security_text)
+direct_codeql = security_jobs.get("codeql-analysis", "")
+codeql_gate = security_jobs.get("codeql-gate", "")
+dry_security = dry_jobs.get("security", "")
+if not re.search(
+        r"run_codeql:\s*\n(?:\s+[^\n]*\n)*?\s+type:\s*boolean\s*\n"
+        r"(?:\s+[^\n]*\n)*?\s+default:\s*false",
+        security_text):
+    failures.append(
+        "_security.yml: workflow_call must expose run_codeql boolean default false.")
+for token in ("if: ${{ inputs.run_codeql }}",
+              "security-events: write",
+              "actions: read",
+              "contents: read",
+              "uses: ./.github/workflows/codeql.yml"):
+    if token not in direct_codeql:
+        failures.append(f"_security.yml codeql-analysis: missing direct-run token: {token}")
+for token in ("workflow_call:",
+              "group: codeql-${{ github.workflow }}-",
+              "github/codeql-action/init@",
+              "scripts/build.sh",
+              "github/codeql-action/analyze@"):
+    if token not in codeql_text:
+        failures.append(f"codeql.yml reusable analysis: missing token: {token}")
+for token in ("needs: [codeql-analysis]",
+              "always() && (!inputs.run_codeql || needs.codeql-analysis.result == 'success')",
+              "if: ${{ !inputs.run_codeql }}",
+              "Check for open code scanning alerts"):
+    if token not in codeql_gate:
+        failures.append(f"_security.yml codeql-gate: missing mode-safe token: {token}")
+for token in ("run_codeql: true", "security-events: write",
+              "actions: read", "contents: read"):
+    if token not in dry_security:
+        failures.append(f"dry-run security: missing branch CodeQL token: {token}")
+for caller_name, caller_body in (
+        ("release", blocks.get("security", "")),
+        ("pr", pathlib.Path(sys.argv[1]).with_name("pr.yml").read_text())):
+    if "run_codeql: true" in caller_body:
+        failures.append(
+            f"{caller_name} security: must keep the external push/PR CodeQL gate")
 for caller_name, caller_jobs in (("release", blocks), ("dry-run", dry_jobs)):
     for downstream in ("smoke", "soak"):
         body = caller_jobs.get(downstream, "")

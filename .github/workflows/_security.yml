@@ -4,7 +4,13 @@
 name: Security Gate
 
 on:
-  workflow_call: {}
+  workflow_call:
+    inputs:
+      run_codeql:
+        description: Run CodeQL directly for callers without a matching push/PR analysis
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -38,11 +44,22 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: scripts/audit-license-provenance.py
 
+  codeql-analysis:
+    if: ${{ inputs.run_codeql }}
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    uses: ./.github/workflows/codeql.yml
+
   codeql-gate:
+    needs: [codeql-analysis]
+    if: ${{ always() && (!inputs.run_codeql || needs.codeql-analysis.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 240
     steps:
       - name: Wait for CodeQL on current commit (max 45 min)
+        if: ${{ !inputs.run_codeql }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
