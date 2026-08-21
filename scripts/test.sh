@@ -263,7 +263,10 @@ bash "$ROOT/tests/test_runtime_isolation_contract.sh"
 echo "=== Step 0u: shell line-ending contract ==="
 bash "$ROOT/tests/test_shell_line_endings.sh"
 
-echo "=== Step 0v: agent workflow benchmark contract ==="
+echo "=== Step 0v: nomic blob generator contract ==="
+bash "$ROOT/tests/test_nomic_blob_generator_contract.sh"
+
+echo "=== Step 0w: agent workflow benchmark contract ==="
 python3 "$ROOT/tests/test_workflow_benchmark_contract.py"
 
 # Verify compiler supports target arch
