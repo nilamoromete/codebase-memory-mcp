@@ -1,0 +1,37 @@
+{
+  "dynamic_ranges": [
+    {"start": 49152, "end": 65535}
+  ],
+  "excluded_ranges": [
+    {"start": 45130, "end": 45140},
+    {"start": 45200, "end": 45205}
+  ],
+  "ports": {
+    "candidate": 45123,
+    "occupied_ipv4": 45124,
+    "occupied_ipv6": 45125
+  },
+  "process_identities": {
+    "owned": {
+      "pid": 41001,
+      "start_time": "2026-08-22T12:00:00.000000Z",
+      "command_fingerprint": "sha256:owned-jcodemunch-fixture",
+      "port": 45123,
+      "runtime_identity": "fixture-runtime-001"
+    },
+    "pid_reused": {
+      "pid": 41001,
+      "start_time": "2026-08-22T12:00:01.000000Z",
+      "command_fingerprint": "sha256:foreign-process-fixture",
+      "port": 45123,
+      "runtime_identity": "foreign-runtime-001"
+    }
+  },
+  "runtime_identity": {
+    "server_name": "jcodemunch",
+    "transport": "streamable-http",
+    "bind_host": "127.0.0.1",
+    "launch_id": "fixture-launch-001",
+    "runtime_identity": "fixture-runtime-001"
+  }
+}

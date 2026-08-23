@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "jcodemunch": {
+    "package": "jcodemunch-mcp",
+    "version": "1.108.291",
+    "artifact": "jcodemunch_mcp-1.108.291-py3-none-any.whl",
+    "executable": "venv/Scripts/python.exe",
+    "transport": "streamable-http",
+    "bind_host": "127.0.0.1",
+    "server_name": "jcodemunch",
+    "bearer_auth": true,
+    "http_extra": true,
+    "python_version": "3.13",
+    "platform": "windows-x64",
+    "requirements_lock": "runtime-requirements.lock",
+    "requirements_sha256": "15feb48d1c14b4ef9af559fd13c65651a22891c2bccc453bc9dab87328dff001",
+    "source": "https://files.pythonhosted.org/packages/e4/40/a97166faa30e618b83b29ec63c99ee56c2a58dea6480869a1a32171f0dcd/jcodemunch_mcp-1.108.291-py3-none-any.whl",
+    "sha256": "41a25402cb755daa55be060d1e8d65183f8868ac3c0b201079d3fb64d8e09f5d",
+    "serve_args": [
+      "-I",
+      "-B",
+      "-m",
+      "jcodemunch_mcp",
+      "serve",
+      "--transport",
+      "streamable-http",
+      "--host",
+      "127.0.0.1"
+    ],
+    "runtime_identity_resource": "munch://runtime/identity"
+  },
+  "stdio_proxy": {
+    "package": "mcp-remote",
+    "version": "0.1.43",
+    "artifact": "mcp-remote-0.1.43.tgz",
+    "source": "https://registry.npmjs.org/mcp-remote/-/mcp-remote-0.1.43.tgz",
+    "integrity": "sha512-N2pGvTAPlHSH64iftgaVsR9J2+QUgCkTbaFb8XMxRbOFvJTCFONJOUNOxfnxPc0FUKyWUE/jpdhabfBI3g/gPw==",
+    "shasum": "577562c2e0eb121cb7911a62205c088faa53a23a",
+    "entrypoint": "node_modules/mcp-remote/dist/proxy.js",
+    "transport": "http-only"
+  },
+  "pi_adapter": {
+    "package": "pi-mcp-extension",
+    "version": "1.5.0",
+    "transport": "stdio",
+    "source": "https://registry.npmjs.org/pi-mcp-extension/-/pi-mcp-extension-1.5.0.tgz",
+    "integrity": "sha512-tfsgi8qSr3UUKMp4vS9/FwKv+Pn2U4T/rTlAwrZkEIvz616mFrU/Ryp3b69ZDfFdkQVVXriaQmZUj4vlZDV2Uw=="
+  }
+}

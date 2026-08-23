@@ -7628,6 +7628,18 @@ static void install_claude_code_config(const char *home, const char *binary_path
         plan_record("Claude Code", "hook", p);
         snprintf(p, sizeof(p), "%s/hooks/%s", config_dir, CMM_SUBAGENT_REMINDER_SCRIPT);
         plan_record("Claude Code", "hook", p);
+        snprintf(p, sizeof(p), "%s/.mcp.json", config_dir);
+        plan_record("Claude Code", "cleanup_file", p);
+        snprintf(p, sizeof(p), "%s/codebase-memory-mcp", skills_dir);
+        plan_record("Claude Code", "cleanup_directory", p);
+#ifdef _WIN32
+        snprintf(p, sizeof(p), "%s/hooks/%s", config_dir, CMM_HOOK_GATE_SCRIPT_LEGACY);
+        plan_record("Claude Code", "cleanup_file", p);
+        snprintf(p, sizeof(p), "%s/hooks/%s", config_dir, CMM_SESSION_REMINDER_SCRIPT_LEGACY);
+        plan_record("Claude Code", "cleanup_file", p);
+        snprintf(p, sizeof(p), "%s/hooks/%s", config_dir, CMM_SUBAGENT_REMINDER_SCRIPT_LEGACY);
+        plan_record("Claude Code", "cleanup_file", p);
+#endif
         return;
     }
 
@@ -8586,13 +8598,24 @@ static void install_pochi_durable_context(const char *home, bool force, bool dry
         dry_run);
 }
 
+/* Shared by the legacy detector and the callback-driven client registry. */
+static const char *g_client_selection = NULL;
+static bool cli_client_spec_contains(const char *spec, const char *token);
+
 static void install_agent_client_registry(const char *home, const char *binary_path,
                                           bool inherit_claude_session, bool force, bool dry_run) {
     cbm_agent_registry_context_t registry;
     cbm_init_agent_registry_context(home, &registry);
     for (size_t index = 0U; index < cbm_agent_client_count(); index++) {
         const cbm_agent_client_profile_t *profile = cbm_agent_client_at(index);
-        if (!profile || !cbm_agent_client_detect(profile->id, &registry.options)) {
+        bool explicitly_selected = profile && g_client_selection &&
+                                   cli_client_spec_contains(g_client_selection, profile->stable_id);
+        if (!profile ||
+            (!explicitly_selected && !cbm_agent_client_detect(profile->id, &registry.options))) {
+            continue;
+        }
+        if (g_client_selection &&
+            !cli_client_spec_contains(g_client_selection, profile->stable_id)) {
             continue;
         }
         if (!g_install_plan) {
@@ -9435,7 +9458,6 @@ static void install_additional_agent_configs(const cbm_detected_agents_t *agents
 /* #1558: set by `install --clients=...` after validation, consumed at the one
  * place detection happens. Validation runs in cbm_cmd_install so an unknown
  * token fails before anything is written, not midway through configuring. */
-static const char *g_client_selection = NULL;
 static bool cli_clients_apply_selection(const char *spec, cbm_detected_agents_t *detected);
 static void cli_clients_print_list(FILE *out);
 
@@ -9616,8 +9638,56 @@ static void cli_clients_print_list(FILE *out) {
     for (size_t i = 0; i < CLI_CLIENT_COUNT; i++) {
         (void)fprintf(out, "  %-16s %s\n", CLI_CLIENTS[i].token, CLI_CLIENTS[i].display);
     }
+    for (size_t i = 0; i < cbm_agent_client_count(); i++) {
+        const cbm_agent_client_profile_t *profile = cbm_agent_client_at(i);
+        if (!profile) {
+            continue;
+        }
+        bool already_listed = false;
+        for (size_t j = 0; j < CLI_CLIENT_COUNT; j++) {
+            if (strcmp(profile->stable_id, CLI_CLIENTS[j].token) == 0) {
+                already_listed = true;
+                break;
+            }
+        }
+        if (!already_listed) {
+            (void)fprintf(out, "  %-16s %s\n", profile->stable_id, profile->display_name);
+        }
+    }
     (void)fprintf(out, "\nExample: --clients=claude,codex\n"
                        "Omit --clients to configure every detected client.\n");
+}
+
+static bool cli_client_spec_contains(const char *spec, const char *token) {
+    if (!spec || !token || !token[0]) {
+        return false;
+    }
+    char buf[CLI_BUF_1K];
+    snprintf(buf, sizeof(buf), "%s", spec);
+    char *save = NULL;
+    for (char *item = strtok_r(buf, ",", &save); item; item = strtok_r(NULL, ",", &save)) {
+        while (*item == ' ') {
+            item++;
+        }
+        size_t length = strlen(item);
+        while (length > 0 && item[length - 1] == ' ') {
+            item[--length] = '\0';
+        }
+        if (strcmp(item, token) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool cli_registry_client_token_known(const char *token) {
+    for (size_t i = 0; i < cbm_agent_client_count(); i++) {
+        const cbm_agent_client_profile_t *profile = cbm_agent_client_at(i);
+        if (profile && strcmp(profile->stable_id, token) == 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /* Restrict `detected` to the comma-separated token list. Returns false (after
@@ -9648,17 +9718,17 @@ static bool cli_clients_apply_selection(const char *spec, cbm_detected_agents_t 
                 break;
             }
         }
+        if (!matched && cli_registry_client_token_known(tok)) {
+            matched = true;
+        }
         if (!matched) {
             (void)fprintf(stderr, "error: unknown client: %s\n\n", tok);
             cli_clients_print_list(stderr);
             return false;
         }
     }
-    for (size_t i = 0; i < CLI_CLIENT_COUNT; i++) {
-        if (!wanted[i]) {
-            *(bool *)((char *)detected + CLI_CLIENTS[i].offset) = false;
-        }
-    }
+    for (size_t i = 0; i < CLI_CLIENT_COUNT; i++)
+        *(bool *)((char *)detected + CLI_CLIENTS[i].offset) = wanted[i];
     return true;
 }
 
@@ -9672,6 +9742,9 @@ size_t cbm_cli_clients_count_for_testing(void) {
 }
 const char *cbm_cli_clients_token_for_testing(size_t index) {
     return index < CLI_CLIENT_COUNT ? CLI_CLIENTS[index].token : NULL;
+}
+bool cbm_cli_client_spec_contains_for_testing(const char *spec, const char *token) {
+    return cli_client_spec_contains(spec, token);
 }
 #endif
 
@@ -9816,6 +9889,10 @@ static char *cbm_build_install_plan_json_options(const char *home, const char *b
     }
 
     cbm_detected_agents_t det = cbm_detect_agents(home);
+    if (g_client_selection && !cli_clients_apply_selection(g_client_selection, &det)) {
+        free(plan.items);
+        return NULL;
+    }
     struct {
         bool flag;
         const char *name;
@@ -9862,7 +9939,10 @@ static char *cbm_build_install_plan_json_options(const char *home, const char *b
     cbm_init_agent_registry_context(home, &registry);
     for (size_t index = 0U; index < cbm_agent_client_count(); index++) {
         const cbm_agent_client_profile_t *profile = cbm_agent_client_at(index);
-        if (profile && cbm_agent_client_detect(profile->id, &registry.options)) {
+        if (profile &&
+            (!g_client_selection ||
+             cli_client_spec_contains(g_client_selection, profile->stable_id)) &&
+            cbm_agent_client_detect(profile->id, &registry.options)) {
             yyjson_mut_arr_add_str(doc, agents, profile->stable_id);
         }
     }
@@ -9874,9 +9954,15 @@ static char *cbm_build_install_plan_json_options(const char *home, const char *b
     yyjson_mut_val *agent_files = yyjson_mut_arr(doc);
     yyjson_mut_val *prompt_files = yyjson_mut_arr(doc);
     yyjson_mut_val *hooks = yyjson_mut_arr(doc);
+    yyjson_mut_val *cleanup_files = yyjson_mut_arr(doc);
+    yyjson_mut_val *cleanup_directories = yyjson_mut_arr(doc);
     for (int i = 0; i < plan.count; i++) {
         cbm_plan_entry_t *e = &plan.items[i];
-        if (strcmp(e->kind, "mcp_config") == 0) {
+        if (strcmp(e->kind, "cleanup_file") == 0) {
+            yyjson_mut_arr_add_strcpy(doc, cleanup_files, e->path);
+        } else if (strcmp(e->kind, "cleanup_directory") == 0) {
+            yyjson_mut_arr_add_strcpy(doc, cleanup_directories, e->path);
+        } else if (strcmp(e->kind, "mcp_config") == 0) {
             yyjson_mut_arr_add_strcpy(doc, configs, e->path);
         } else if (strcmp(e->kind, "hook") == 0) {
             yyjson_mut_val *h = yyjson_mut_obj(doc);
@@ -9902,6 +9988,8 @@ static char *cbm_build_install_plan_json_options(const char *home, const char *b
     yyjson_mut_obj_add_val(doc, root, "agent_files_planned", agent_files);
     yyjson_mut_obj_add_val(doc, root, "prompt_files_planned", prompt_files);
     yyjson_mut_obj_add_val(doc, root, "hooks_planned", hooks);
+    yyjson_mut_obj_add_val(doc, root, "cleanup_files_planned", cleanup_files);
+    yyjson_mut_obj_add_val(doc, root, "cleanup_directories_planned", cleanup_directories);
     yyjson_mut_obj_add_bool(doc, root, "writes_started", false);
     yyjson_mut_obj_add_bool(doc, root, "network_after_install", false);
     yyjson_mut_obj_add_str(doc, root, "next_safe_command", "codebase-memory-mcp install -y");
@@ -9930,6 +10018,10 @@ typedef struct {
      * edit too, since adding a directory to PATH for a binary we did not
      * install is exactly the unasked-for change that was complained about. */
     bool skip_binary;
+    /* Publish the binary inside the activation barrier, but leave every client
+     * configuration and PATH surface untouched. This is the native hand-off
+     * used by the hybrid installer before its unified config transaction. */
+    bool binary_only;
     bool delete_indexes;
     bool skip_config;
     bool force;
@@ -10007,7 +10099,7 @@ static int cli_install_activate(void *opaque) {
     /* #1566: only touch PATH when WE placed the binary. Appending to a shell rc
      * for a binary installed by someone else is an unasked-for change to a file
      * we do not own, and the directory we would add may hold nothing at all. */
-    if (activation->skip_binary) {
+    if (activation->skip_binary || activation->binary_only) {
         cli_activation_transaction_finalize_committed_or_fail_stop(&activation->binary_transaction,
                                                                    "install_transaction_finalize");
         return CLI_OK;
@@ -10055,6 +10147,9 @@ static int cli_install_activate(void *opaque) {
 }
 
 int cbm_cmd_install(int argc, char **argv) {
+    /* The command may be invoked more than once by an embedding/test process.
+     * Never let a prior scoped install leak into the next invocation. */
+    g_client_selection = NULL;
     parse_auto_answer(argc, argv);
     bool dry_run = false;
     bool force = false;
@@ -10062,9 +10157,11 @@ int cbm_cmd_install(int argc, char **argv) {
     bool reset_indexes = false;
     bool skip_config = false;
     bool skip_binary = false;
+    bool binary_only = false;
     bool force_binary = false;
     const char *requested_clients = NULL;
     const char *requested_bin_dir = NULL;
+    const char *requested_binary_source = NULL;
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "--dry-run") == 0) {
             dry_run = true;
@@ -10092,6 +10189,21 @@ int cbm_cmd_install(int argc, char **argv) {
             /* #1566: the mirror of --skip-config. Configure the agents, leave
              * the binary and PATH alone. */
             skip_binary = true;
+        } else if (strcmp(argv[i], "--binary-only") == 0) {
+            binary_only = true;
+            skip_config = true;
+        } else if (strncmp(argv[i], "--binary-source=", SLEN("--binary-source=")) == 0) {
+            requested_binary_source = argv[i] + SLEN("--binary-source=");
+            if (!requested_binary_source[0]) {
+                (void)fprintf(stderr, "error: --binary-source requires a non-empty path\n");
+                return CLI_TRUE;
+            }
+        } else if (strcmp(argv[i], "--binary-source") == 0) {
+            if (i + 1 >= argc || !argv[i + 1] || !argv[i + 1][0] || argv[i + 1][0] == '-') {
+                (void)fprintf(stderr, "error: --binary-source requires a non-empty path\n");
+                return CLI_TRUE;
+            }
+            requested_binary_source = argv[++i];
         } else if (strcmp(argv[i], "--force-binary") == 0) {
             force_binary = true;
         } else if (strncmp(argv[i], "--dir=", SLEN("--dir=")) == 0) {
@@ -10111,6 +10223,15 @@ int cbm_cmd_install(int argc, char **argv) {
             (void)fprintf(stderr, "error: unknown install option: %s\n", argv[i]);
             return CLI_TRUE;
         }
+    }
+
+    if (binary_only && skip_binary) {
+        (void)fprintf(stderr, "error: --binary-only and --skip-binary are mutually exclusive\n");
+        return CLI_TRUE;
+    }
+    if (requested_binary_source && !binary_only) {
+        (void)fprintf(stderr, "error: --binary-source requires --binary-only\n");
+        return CLI_TRUE;
     }
 
     const char *home = cbm_get_home_dir();
@@ -10140,6 +10261,17 @@ int cbm_cmd_install(int argc, char **argv) {
         return CLI_TRUE;
     }
 
+    /* Validate and apply the selector before plan generation. Plan mode runs
+     * the same dispatch in record-only mode, so it must describe only the
+     * requested clients too. */
+    if (requested_clients) {
+        cbm_detected_agents_t probe = cbm_detect_agents(home);
+        if (!cli_clients_apply_selection(requested_clients, &probe)) {
+            return CLI_TRUE;
+        }
+        g_client_selection = requested_clients;
+    }
+
     /* --plan: emit the machine-readable install receipt and exit WITHOUT
      * mutating anything (no config writes, no index deletion, no network) so
      * an agent can inspect exactly what install would touch first (#388). */
@@ -10154,25 +10286,34 @@ int cbm_cmd_install(int argc, char **argv) {
         return 0;
     }
 
-    /* #1558: validate the client tokens BEFORE anything is written, so a typo
-     * fails immediately instead of part-way through configuring. */
-    if (requested_clients) {
-        cbm_detected_agents_t probe = cbm_detect_agents(home);
-        if (!cli_clients_apply_selection(requested_clients, &probe)) {
-            return CLI_TRUE;
-        }
-        g_client_selection = requested_clients;
-    }
-
     printf("codebase-memory-mcp install %s\n\n", CBM_VERSION);
 
     char self_path[CLI_BUF_1K] = {0};
     bool self_path_exact = cbm_detect_self_path(self_path, sizeof(self_path), home);
+    char binary_source[CLI_BUF_1K] = {0};
+    const char *install_source = self_path;
+    if (requested_binary_source) {
+        int source_length = snprintf(binary_source, sizeof(binary_source), "%s",
+                                     requested_binary_source);
+        if (source_length <= 0 || (size_t)source_length >= sizeof(binary_source)) {
+            (void)fprintf(stderr, "error: binary source path is too long\n");
+            return CLI_TRUE;
+        }
+        cbm_normalize_path_sep(binary_source);
+        cbm_path_info_t source_status;
+        if (cbm_path_info_utf8(binary_source, &source_status) != 0 ||
+            !source_status.is_regular || source_status.is_symlink) {
+            (void)fprintf(stderr, "error: binary source must be a regular non-link file: %s\n",
+                          binary_source);
+            return CLI_TRUE;
+        }
+        install_source = binary_source;
+    }
 
     /* #1566: a binary owned by mise/Homebrew/nix is not ours to relocate. Infer
      * it, and let either flag override the inference in either direction. */
-    bool externally_managed =
-        !force_binary && cli_binary_is_externally_managed(self_path, self_path_exact, bin_dir);
+    bool externally_managed = !requested_binary_source && !force_binary &&
+                              cli_binary_is_externally_managed(self_path, self_path_exact, bin_dir);
     if (externally_managed || skip_binary) {
         const char *manager = cli_external_manager_name(self_path);
         if (skip_binary) {
@@ -10191,7 +10332,7 @@ int cbm_cmd_install(int argc, char **argv) {
      * install silently overwrites bytes the user asked to keep. */
     cbm_path_info_t target_status;
     bool target_exists = cbm_path_info_utf8(bin_target, &target_status) == 0;
-    bool same_binary = cbm_same_file(self_path, bin_target);
+    bool same_binary = cbm_same_file(install_source, bin_target);
     bool do_copy = !skip_binary && !same_binary && (!target_exists || force);
 
     /* (#607) Default: preserve existing indexes. `--reset-indexes` opts into
@@ -10233,10 +10374,10 @@ int cbm_cmd_install(int argc, char **argv) {
     char prepared_candidate[CLI_BUF_1K] = {0};
     if (!dry_run && prepare_binary) {
 #ifdef __APPLE__
-        const char *candidate = do_copy ? self_path : bin_target;
+        const char *candidate = do_copy ? install_source : bin_target;
 #else
         /* Non-macOS activation reaches this block only for a real copy. */
-        const char *candidate = self_path;
+        const char *candidate = install_source;
 #endif
         bool target_parent_exists = cbm_is_dir(bin_dir);
         bool prepare_out_of_line = !target_parent_exists;
@@ -10369,12 +10510,14 @@ int cbm_cmd_install(int argc, char **argv) {
         .delete_indexes = delete_indexes,
         .skip_config = skip_config,
         .skip_binary = skip_binary,
+        .binary_only = binary_only,
         .force = force,
         .dry_run = dry_run,
     };
     int activation_rc =
         dry_run ? cli_install_activate(&activation)
-                : cli_activation_guard(CBM_DAEMON_RUNTIME_ACTIVATION_INSTALL, CBM_VERSION,
+                : cli_activation_guard(CBM_DAEMON_RUNTIME_ACTIVATION_INSTALL,
+                                       requested_binary_source ? NULL : CBM_VERSION,
                                        has_binary_validator ? binary_validator.fingerprint : NULL,
                                        cli_install_activate, &activation);
     if (activation.binary_transaction) {
@@ -11550,6 +11693,7 @@ typedef struct {
     cbm_activation_transaction_t *binary_transaction;
     cbm_detected_agents_t agents;
     bool binary_exists;
+    bool binary_only;
     bool delete_indexes;
     bool dry_run;
 } cli_uninstall_activation_t;
@@ -11614,13 +11758,15 @@ static int cli_uninstall_activate(void *opaque) {
         return CLI_TRUE;
     }
 
-    if (activation->agents.claude_code) {
-        uninstall_claude_code(activation->home, activation->dry_run);
+    if (!activation->binary_only) {
+        if (activation->agents.claude_code) {
+            uninstall_claude_code(activation->home, activation->dry_run);
+        }
+        uninstall_cli_agents(&activation->agents, activation->home, activation->dry_run);
+        uninstall_editor_agents(&activation->agents, activation->home, activation->dry_run);
+        uninstall_additional_agents(&activation->agents, activation->home, activation->dry_run);
+        uninstall_agent_client_registry(activation->home, activation->dry_run);
     }
-    uninstall_cli_agents(&activation->agents, activation->home, activation->dry_run);
-    uninstall_editor_agents(&activation->agents, activation->home, activation->dry_run);
-    uninstall_additional_agents(&activation->agents, activation->home, activation->dry_run);
-    uninstall_agent_client_registry(activation->home, activation->dry_run);
 
     if (g_agent_uninstall_errors != 0) {
         cli_activation_transaction_abort_or_fail_stop(&activation->binary_transaction,
@@ -11658,7 +11804,9 @@ static int cli_uninstall_activate(void *opaque) {
     if (activation->binary_exists) {
         printf("Removed %s\n", activation->bin_path);
     }
-    cli_uninstall_report_leftover_installer(activation->bin_path, activation->dry_run);
+    if (!activation->binary_only) {
+        cli_uninstall_report_leftover_installer(activation->bin_path, activation->dry_run);
+    }
     return CLI_OK;
 }
 
@@ -11681,6 +11829,7 @@ int cbm_cmd_uninstall(int argc, char **argv) {
                    "Options:\n"
                    "  --dry-run        Show what would be removed, change nothing\n"
                    "  --dir=PATH       Uninstall from a custom install directory\n"
+                   "  --binary-only    Remove only the binary through the activation barrier\n"
                    "  -y, --yes        Do not prompt for confirmation\n"
                    "  -h, --help       Show this help and exit\n\n"
                    "Run with --dry-run first if you are unsure.\n");
@@ -11689,6 +11838,7 @@ int cbm_cmd_uninstall(int argc, char **argv) {
     }
     parse_auto_answer(argc, argv);
     bool dry_run = false;
+    bool binary_only = false;
     /* An install into a custom --dir must be removable from that same dir:
      * without this, anyone who installed outside ~/.local/bin has no supported
      * uninstall path at all. Mirrors cbm_cmd_install's parsing. */
@@ -11701,6 +11851,8 @@ int cbm_cmd_uninstall(int argc, char **argv) {
         }
         if (strcmp(argv[i], "--dry-run") == 0) {
             dry_run = true;
+        } else if (strcmp(argv[i], "--binary-only") == 0) {
+            binary_only = true;
         } else if (strncmp(argv[i], "--dir=", SLEN("--dir=")) == 0) {
             requested_bin_dir = argv[i] + SLEN("--dir=");
             if (!requested_bin_dir[0]) {
@@ -11729,12 +11881,13 @@ int cbm_cmd_uninstall(int argc, char **argv) {
     printf("codebase-memory-mcp uninstall\n\n");
 
     g_agent_uninstall_errors = 0;
-    cbm_detected_agents_t agents = cbm_detect_agents(home);
+    cbm_detected_agents_t agents = binary_only ? (cbm_detected_agents_t){0}
+                                               : cbm_detect_agents(home);
 
     /* Confirm index removal outside the startup lock, but defer the mutation
      * until the final guarded activation. Dry-run never removes indexes. */
     bool delete_indexes = false;
-    int index_count = count_db_indexes(home);
+    int index_count = binary_only ? 0 : count_db_indexes(home);
     if (index_count > 0) {
         printf("\nFound %d index(es):\n", index_count);
         cbm_list_indexes(home);
@@ -11783,6 +11936,7 @@ int cbm_cmd_uninstall(int argc, char **argv) {
         .binary_transaction = binary_transaction,
         .agents = agents,
         .binary_exists = binary_exists,
+        .binary_only = binary_only,
         .delete_indexes = delete_indexes,
         .dry_run = dry_run,
     };

@@ -99,9 +99,9 @@ Out of scope:
 
 ## 10. Definition of done
 
-- [ ] Latest upstream is integrated without losing fork tools.
+- [x] Latest upstream is integrated without losing fork tools.
 - [ ] Exact fork build is installed and traceable.
-- [ ] Latest stable jCodeMunch is pinned and verified.
+- [x] Latest stable jCodeMunch is pinned and verified.
 - [ ] Codex, Claude, and Pi expose both toolsets.
 - [ ] Real multi-project acceptance passes.
 - [ ] Last-client cleanup leaves zero owned idle processes/listeners.
@@ -114,11 +114,20 @@ Out of scope:
 - **Secondary risk:** upstream integration drops fork workflow behavior.
 - **Rollback:** restore the complete client snapshots, keep the prior verified binaries, and refuse runtime removal while verified leases exist.
 
-## 12. Handoff note
+## 12. Pre-cutover implementation checkpoint
 
-- **Current truth:** installed clients are inconsistent and both engines are outdated relative to their intended sources.
-- **Preserved contract:** both engines remain available; no FarmOS product changes.
-- **Verification run:** read-only version, config, process, remote, and graph audit completed.
-- **Remaining risk:** active clients still own legacy processes and require controlled restart after cutover.
-- **Safe next step:** create the detailed implementation plan and execute it on the correct branch.
-- **Unsafe next step:** delete the FarmOS branch or kill matching process names before acceptance.
+- **Implementation truth:** the hybrid runtime, three-client transactional
+  cutover, exact-owner lifecycle, full runtime/integration manifests, canonical
+  candidate provenance, and native binary-only activation barrier are present
+  in the correct fork worktree.
+- **Preserved contract:** the fork workflow/graph tools and native daemon
+  behavior remain available; no FarmOS product behavior is changed.
+- **Verification run:** PowerShell parser gate, targeted hybrid contracts,
+  native CLI suite, graph-recommended package tests, and independent security
+  review. The live cutover evidence is intentionally recorded in the final
+  installation receipt/operator handoff rather than pre-claimed here.
+- **Remaining risk at this checkpoint:** active clients still own legacy
+  processes and require controlled restart after cutover.
+- **Next safe action:** attest the clean committed fork build, execute the
+  transaction, run three-client acceptance, then remove only the exact erroneous
+  FarmOS branch/worktree after the correct fork is pushed.

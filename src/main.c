@@ -901,8 +901,8 @@ static void print_help(void) {
     printf("  codebase-memory-mcp cli [--progress] [--json] <tool> [args]\n");
     printf("                                      Run one tool locally, then exit\n");
     printf("  codebase-memory-mcp install [-y|-n] [--force] [--dry-run] "
-           "[--dir=<path>] [--skip-config]\n");
-    printf("  codebase-memory-mcp uninstall [-y|-n] [--dry-run]\n");
+           "[--dir=<path>] [--skip-config] [--binary-only] [--binary-source=<path>]\n");
+    printf("  codebase-memory-mcp uninstall [-y|-n] [--dry-run] [--binary-only]\n");
     printf("  codebase-memory-mcp update [-y|-n]\n");
     printf("  codebase-memory-mcp config <list|get|set|reset>\n");
     printf("  codebase-memory-mcp --version    Print version\n");

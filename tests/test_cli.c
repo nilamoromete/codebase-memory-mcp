@@ -1063,7 +1063,7 @@ TEST(cli_install_force_quiesces_active_cohort_before_replacing_binary) {
     PASS();
 }
 
-TEST(cli_install_dir_and_skip_config_stage_first_install_safely) {
+TEST(cli_install_binary_only_stages_first_install_without_config_or_path) {
     char tmpdir[256];
     snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-install-dir-XXXXXX");
     if (!cbm_mkdtemp(tmpdir)) {
@@ -1081,6 +1081,7 @@ TEST(cli_install_dir_and_skip_config_stage_first_install_safely) {
     char target_path[640];
     char codex_dir[512];
     char codex_config[640];
+    char shell_rc[640];
     snprintf(cache_dir, sizeof(cache_dir), "%s/cache", tmpdir);
     snprintf(install_dir, sizeof(install_dir), "%s/custom/new/bin", tmpdir);
     snprintf(target_path, sizeof(target_path),
@@ -1091,6 +1092,7 @@ TEST(cli_install_dir_and_skip_config_stage_first_install_safely) {
 #endif
     snprintf(codex_dir, sizeof(codex_dir), "%s/.codex", tmpdir);
     snprintf(codex_config, sizeof(codex_config), "%s/config.toml", codex_dir);
+    snprintf(shell_rc, sizeof(shell_rc), "%s/.zshrc", tmpdir);
     cbm_setenv("CBM_CACHE_DIR", cache_dir, 1);
     test_mkdirp(codex_dir);
 
@@ -1099,19 +1101,21 @@ TEST(cli_install_dir_and_skip_config_stage_first_install_safely) {
     };
     cbm_cli_activation_ops_t ops = cli_activation_fake_ops(&fake);
     cbm_cli_set_activation_ops_for_test(&ops);
-    char *argv[] = {"--force", "--skip-config", "--yes", "--dir", install_dir};
+    char *argv[] = {"--force", "--binary-only", "--yes", "--dir", install_dir};
     int rc = cli_test_cmd_install(5, argv);
     char equals_arg[640];
     snprintf(equals_arg, sizeof(equals_arg), "--dir=%s", install_dir);
-    char *dry_argv[] = {"--force", "--skip-config", "--dry-run", equals_arg};
+    char *dry_argv[] = {"--force", "--binary-only", "--dry-run", equals_arg};
     int dry_rc = cli_test_cmd_install(4, dry_argv);
     cbm_cli_set_activation_ops_for_test(NULL);
     cbm_set_auto_answer_for_test(0);
 
     struct stat target_status;
     struct stat config_status;
+    struct stat shell_status;
     bool target_exists = stat(target_path, &target_status) == 0;
     bool config_absent = stat(codex_config, &config_status) != 0;
+    bool shell_untouched = stat(shell_rc, &shell_status) != 0;
     if (old_shell) {
         cbm_setenv("SHELL", old_shell, 1);
     } else {
@@ -1125,8 +1129,76 @@ TEST(cli_install_dir_and_skip_config_stage_first_install_safely) {
     ASSERT_EQ(dry_rc, 0);
     ASSERT_TRUE(target_exists);
     ASSERT_TRUE(config_absent);
+    ASSERT_TRUE(shell_untouched);
     ASSERT_EQ(fake.mutation_reserve_count, 1);
     ASSERT_EQ(fake.mutation_lease_release_count, 1);
+    PASS();
+}
+
+TEST(cli_binary_source_install_and_binary_only_uninstall_use_activation_barrier) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-binary-rollback-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir)) {
+        FAIL("cbm_mkdtemp failed");
+    }
+    char *old_home = NULL;
+    char *old_cache = NULL;
+    cli_activation_save_env(&old_home, &old_cache);
+    cbm_setenv("HOME", tmpdir, 1);
+    char cache_dir[512];
+    char install_dir[512];
+    char source_path[640];
+    char target_path[640];
+    char codex_dir[512];
+    char codex_config[640];
+    snprintf(cache_dir, sizeof(cache_dir), "%s/cache", tmpdir);
+    snprintf(install_dir, sizeof(install_dir), "%s/bin", tmpdir);
+    snprintf(source_path, sizeof(source_path), "%s/recorded-candidate", tmpdir);
+    snprintf(target_path, sizeof(target_path),
+#ifdef _WIN32
+             "%s/codebase-memory-mcp.exe", install_dir);
+#else
+             "%s/codebase-memory-mcp", install_dir);
+#endif
+    snprintf(codex_dir, sizeof(codex_dir), "%s/.codex", tmpdir);
+    snprintf(codex_config, sizeof(codex_config), "%s/config.toml", codex_dir);
+    cbm_setenv("CBM_CACHE_DIR", cache_dir, 1);
+    test_mkdirp(codex_dir);
+    write_test_file(source_path, "recorded rollback candidate\n");
+
+    cli_activation_fake_t fake = {
+        .mutation_reserve_result = 1,
+    };
+    cbm_cli_activation_ops_t ops = cli_activation_fake_ops(&fake);
+    cbm_cli_set_activation_ops_for_test(&ops);
+    char *install_argv[] = {"--force", "--binary-only", "--binary-source", source_path,
+                            "--yes", "--dir", install_dir};
+    int install_rc = cli_test_cmd_install(7, install_argv);
+    int config_rc = cbm_upsert_codex_mcp(target_path, codex_config);
+    char *config_before = read_test_file_alloc(codex_config);
+    char *installed = read_test_file_alloc(target_path);
+    char *uninstall_argv[] = {"--yes", "--binary-only", "--dir", install_dir};
+    int uninstall_rc = cli_test_cmd_uninstall(4, uninstall_argv);
+    char *config_after = read_test_file_alloc(codex_config);
+    bool target_absent = access(target_path, F_OK) != 0;
+    bool exact_source = installed && strcmp(installed, "recorded rollback candidate\n") == 0;
+    bool config_preserved = config_before && config_after && strcmp(config_before, config_after) == 0;
+    free(installed);
+    free(config_before);
+    free(config_after);
+    cbm_cli_set_activation_ops_for_test(NULL);
+    cbm_set_auto_answer_for_test(0);
+    cli_activation_restore_env(old_home, old_cache);
+    test_rmdir_r(tmpdir);
+
+    ASSERT_EQ(install_rc, 0);
+    ASSERT_EQ(config_rc, 0);
+    ASSERT_EQ(uninstall_rc, 0);
+    ASSERT_TRUE(exact_source);
+    ASSERT_TRUE(target_absent);
+    ASSERT_TRUE(config_preserved);
+    ASSERT_EQ(fake.mutation_reserve_count, 2);
+    ASSERT_EQ(fake.mutation_lease_release_count, 2);
     PASS();
 }
 
@@ -1139,11 +1211,17 @@ TEST(cli_activation_commands_reject_malformed_and_unknown_flags) {
     char *missing_dir[] = {"--dir"};
     char *empty_dir[] = {"--dir="};
     char *bad_install[] = {"--skip-config=value"};
+    char *missing_source[] = {"--binary-source"};
+    char *empty_source[] = {"--binary-source="};
+    char *unscoped_source[] = {"--binary-source=/tmp/candidate"};
     char *bad_update[] = {"--not-an-update-option"};
     char *bad_uninstall[] = {"--not-an-uninstall-option"};
     int missing_rc = cli_test_cmd_install(1, missing_dir);
     int empty_rc = cli_test_cmd_install(1, empty_dir);
     int install_rc = cli_test_cmd_install(1, bad_install);
+    int missing_source_rc = cli_test_cmd_install(1, missing_source);
+    int empty_source_rc = cli_test_cmd_install(1, empty_source);
+    int unscoped_source_rc = cli_test_cmd_install(1, unscoped_source);
     int update_rc = cli_test_cmd_update(1, bad_update);
     int uninstall_rc = cli_test_cmd_uninstall(1, bad_uninstall);
     cbm_cli_set_activation_ops_for_test(NULL);
@@ -1151,6 +1229,9 @@ TEST(cli_activation_commands_reject_malformed_and_unknown_flags) {
     ASSERT_EQ(missing_rc, 1);
     ASSERT_EQ(empty_rc, 1);
     ASSERT_EQ(install_rc, 1);
+    ASSERT_EQ(missing_source_rc, 1);
+    ASSERT_EQ(empty_source_rc, 1);
+    ASSERT_EQ(unscoped_source_rc, 1);
     ASSERT_EQ(update_rc, 1);
     ASSERT_EQ(uninstall_rc, 1);
     ASSERT_EQ(fake.mutation_reserve_count, 0);
@@ -7377,8 +7458,17 @@ TEST(cli_claude_user_scope_avoids_nested_mcp_json) {
     test_mkdirp(dir);
 
     char *json = cbm_build_install_plan_json(tmpdir, "/usr/local/bin/codebase-memory-mcp");
-    bool has_user_config = json && strstr(json, "/.claude.json") != NULL;
-    bool has_invalid_nested = json && strstr(json, "/.claude/.mcp.json") != NULL;
+    yyjson_doc *document = json ? yyjson_read(json, strlen(json), 0) : NULL;
+    yyjson_val *root = document ? yyjson_doc_get_root(document) : NULL;
+    char user_config[512];
+    char invalid_nested[512];
+    snprintf(user_config, sizeof(user_config), "%s/.claude.json", tmpdir);
+    snprintf(invalid_nested, sizeof(invalid_nested), "%s/.claude/.mcp.json", tmpdir);
+    bool has_user_config =
+        test_json_string_array_contains(root, "config_files_planned", user_config);
+    bool has_invalid_nested =
+        test_json_string_array_contains(root, "config_files_planned", invalid_nested);
+    yyjson_doc_free(document);
     free(json);
     test_rmdir_r(tmpdir);
 
@@ -12858,6 +12948,24 @@ TEST(cli_clients_selector_vocabulary_is_complete_and_strict_issue1558) {
     ASSERT_FALSE(sel.cursor);
     ASSERT_FALSE(sel.opencode);
 
+    /* Pi's native graph adapter is a generated extension rather than MCP. It
+     * still must be selectable so a scoped install can publish cbmem.ts. */
+    cbm_detected_agents_t pi_only = all;
+    ASSERT_TRUE(cbm_cli_clients_apply_selection_for_testing("pi", &pi_only));
+    ASSERT_FALSE(pi_only.claude_code);
+    ASSERT_FALSE(pi_only.codex);
+    ASSERT_TRUE(cbm_cli_client_spec_contains_for_testing("claude,codex,pi", "pi"));
+    ASSERT_FALSE(cbm_cli_client_spec_contains_for_testing("claude,codex,pi", "qoder"));
+
+    /* An explicit selector is an install request, not merely a detector filter.
+     * It must configure a requested client even on a fresh home. */
+    cbm_detected_agents_t fresh;
+    memset(&fresh, 0, sizeof(fresh));
+    ASSERT_TRUE(cbm_cli_clients_apply_selection_for_testing("claude,codex", &fresh));
+    ASSERT_TRUE(fresh.claude_code);
+    ASSERT_TRUE(fresh.codex);
+    ASSERT_FALSE(fresh.cursor);
+
     /* Whitespace around tokens is tolerated — people type it. */
     cbm_detected_agents_t spaced = all;
     ASSERT_TRUE(cbm_cli_clients_apply_selection_for_testing(" claude , zed ", &spaced));
@@ -12878,6 +12986,66 @@ TEST(cli_clients_selector_vocabulary_is_complete_and_strict_issue1558) {
         cbm_detected_agents_t one = all;
         ASSERT_TRUE(cbm_cli_clients_apply_selection_for_testing(token, &one));
     }
+    PASS();
+}
+
+TEST(cli_install_plan_honors_client_selector) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-plan-selector-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+
+    char claude_dir[512];
+    char codex_dir[512];
+    char pi_dir[512];
+    snprintf(claude_dir, sizeof(claude_dir), "%s/.claude", tmpdir);
+    snprintf(codex_dir, sizeof(codex_dir), "%s/.codex", tmpdir);
+    snprintf(pi_dir, sizeof(pi_dir), "%s/.pi/agent", tmpdir);
+    test_mkdirp(claude_dir);
+    test_mkdirp(codex_dir);
+    test_mkdirp(pi_dir);
+
+    char *saved_home = save_test_env("HOME");
+    char *saved_userprofile = save_test_env("USERPROFILE");
+    char *saved_claude = save_test_env("CLAUDE_CONFIG_DIR");
+    char *saved_codex = save_test_env("CODEX_HOME");
+    cbm_setenv("HOME", tmpdir, 1);
+    cbm_setenv("USERPROFILE", tmpdir, 1);
+    cbm_setenv("CLAUDE_CONFIG_DIR", claude_dir, 1);
+    cbm_setenv("CODEX_HOME", codex_dir, 1);
+
+    FILE *capture = tmpfile();
+    int saved_stdout = capture ? dup(fileno(stdout)) : -1;
+    ASSERT_NOT_NULL(capture);
+    ASSERT_TRUE(saved_stdout >= 0);
+    fflush(stdout);
+    ASSERT_TRUE(dup2(fileno(capture), fileno(stdout)) >= 0);
+    char *argv[] = {"--plan", "--clients=claude,codex,pi", "--dir", tmpdir};
+    int rc = cli_test_cmd_install(4, argv);
+    fflush(stdout);
+    (void)dup2(saved_stdout, fileno(stdout));
+    close(saved_stdout);
+    rewind(capture);
+    char output[65536];
+    size_t got = fread(output, 1, sizeof(output) - 1, capture);
+    output[got] = '\0';
+    fclose(capture);
+
+    restore_test_env("HOME", saved_home);
+    restore_test_env("USERPROFILE", saved_userprofile);
+    restore_test_env("CLAUDE_CONFIG_DIR", saved_claude);
+    restore_test_env("CODEX_HOME", saved_codex);
+    test_rmdir_r(tmpdir);
+
+    ASSERT_EQ(rc, 0);
+    ASSERT_NOT_NULL(strstr(output, "claude-code"));
+    ASSERT_NOT_NULL(strstr(output, "codex"));
+    ASSERT_NOT_NULL(strstr(output, "pi"));
+    ASSERT_NOT_NULL(strstr(output, "cleanup_files_planned"));
+    ASSERT_NOT_NULL(strstr(output, ".claude/.mcp.json"));
+    ASSERT_NOT_NULL(strstr(output, "cleanup_directories_planned"));
+    ASSERT_NULL(strstr(output, "cursor"));
+    ASSERT_NULL(strstr(output, "opencode"));
     PASS();
 }
 
@@ -13016,7 +13184,8 @@ SUITE(cli) {
     RUN_TEST(cli_activation_quiesce_does_not_wait_on_bootstrap_startup);
 #endif
     RUN_TEST(cli_install_force_quiesces_active_cohort_before_replacing_binary);
-    RUN_TEST(cli_install_dir_and_skip_config_stage_first_install_safely);
+    RUN_TEST(cli_install_binary_only_stages_first_install_without_config_or_path);
+    RUN_TEST(cli_binary_source_install_and_binary_only_uninstall_use_activation_barrier);
     RUN_TEST(cli_activation_commands_reject_malformed_and_unknown_flags);
     RUN_TEST(cli_install_reset_deletion_waits_for_final_activation_guard);
     RUN_TEST(cli_install_config_only_waits_for_cohort_drain);
@@ -13028,6 +13197,7 @@ SUITE(cli) {
     RUN_TEST(cli_skill_frontmatter_scalars_with_colons_are_quoted_issue1554);
     RUN_TEST(cli_external_manager_detection_needs_positive_evidence_issue1566);
     RUN_TEST(cli_clients_selector_vocabulary_is_complete_and_strict_issue1558);
+    RUN_TEST(cli_install_plan_honors_client_selector);
     RUN_TEST(cli_update_accepts_retired_variant_flags_issue1544);
     RUN_TEST(cli_update_agent_configs_finish_before_guard_release);
     RUN_TEST(cli_uninstall_quiesces_active_cohort_before_removing_binary_and_index);

@@ -69,7 +69,8 @@ Unblock-File .\install.ps1
 
 > **Note:** If you see a script execution policy error, run `Set-ExecutionPolicy -Scope Process Bypass` first, or invoke with `PowerShell -ExecutionPolicy Bypass -File .\install.ps1`.
 
-Options: `--skip-config` (binary only, no agent setup), `--dir=<path>` (custom location).
+Options: `--skip-config` (no agent setup), `--binary-only` (publish only the binary,
+without agent or PATH changes), `--dir=<path>` (custom location).
 
 > **Antivirus note:** Microsoft Defender may flag a release binary as
 > `Trojan:Script/Wacatac.B!ml`. This is a known false positive — typically 61 of
@@ -80,6 +81,29 @@ Options: `--skip-config` (binary only, no agent setup), `--dir=<path>` (custom l
 > think we are wrong.
 
 Restart your coding agent. Say **"Index this project"** — done.
+
+### Maintained fork: hybrid agent runtime on Windows
+
+The `nilamoromete/codebase-memory-mcp` fork can install a deliberately hybrid
+local code-intelligence stack for Codex, Claude Code, and Pi. The native
+codebase-memory-mcp engine remains the structural knowledge graph and keeps its
+per-account coordination daemon. A separately pinned jCodeMunch 1.108.291
+companion supplies symbol-oriented retrieval through one authenticated
+loopback-only Streamable HTTP singleton. Each client reaches that singleton
+through a fork-owned STDIO bridge and a pinned `mcp-remote` 0.1.43 proxy.
+
+The bridge owns an exact PID/start-time lease, so several clients and several
+repositories share one heavy companion process without sharing project
+identity. The final client release arms a short generation-bound shutdown;
+cleanup validates PID, start time, executable path and SHA-256, version,
+runtime identity, launch identity, port, and command fingerprint before it can
+stop anything. It never kills by executable name and never hard-codes a common
+port.
+
+Install and operational commands are documented in
+[`integrations/jcodemunch/README.md`](integrations/jcodemunch/README.md) and the
+[`hybrid runtime runbook`](docs/hybrid-runtime-runbook.md). Restart already-open
+clients after every cutover or rollback.
 
 <details>
 <summary>Manual install</summary>

@@ -1,0 +1,9 @@
+{
+  "name": "codebase-memory-mcp-jcodemunch-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pinned STDIO to Streamable HTTP bridge dependency for the hybrid runtime.",
+  "dependencies": {
+    "mcp-remote": "0.1.43"
+  }
+}
