@@ -56,6 +56,14 @@ if([OperatingSystem]::IsWindows()){
 $buildStarted=[DateTime]::UtcNow
 $start=[Diagnostics.ProcessStartInfo]::new();$start.FileName=$bash;$start.WorkingDirectory=$source
 $start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+if([OperatingSystem]::IsWindows()){
+    # ProcessStartInfo preserves the Windows PATH order. Without this boundary,
+    # MSYS recipes can resolve WSL/System32 bash, find, or ld before the MSYS
+    # toolchain and silently emit ELF objects for a Windows target.
+    [void]$start.ArgumentList.Add("-c")
+    [void]$start.ArgumentList.Add('export PATH="/clang64/bin:/usr/bin:/bin:$PATH"; exec /usr/bin/bash "$@"')
+    [void]$start.ArgumentList.Add("cbm-attested-build")
+}
 foreach($argument in $buildArguments){[void]$start.ArgumentList.Add($argument)}
 $process=[Diagnostics.Process]::new();$process.StartInfo=$start
 if(-not$process.Start()){throw "Unable to start the canonical production build."}

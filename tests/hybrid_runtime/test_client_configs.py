@@ -174,6 +174,8 @@ def test_candidate_provenance_is_emitted_only_by_the_canonical_clean_build() -> 
         "build/attested-candidate",
         '"--with-ui"',
         "npm.cmd",
+        'export PATH="/clang64/bin:/usr/bin:/bin:$PATH"',
+        'exec /usr/bin/bash "$@"',
         'NPM=`"$msysNpm`"',
         '"--version"',
         "HEAD^{tree}",
