@@ -139,6 +139,15 @@ def test_runtime_startup_budget_covers_verified_windows_cold_start() -> None:
     )
 
 
+def test_configure_does_not_require_manifest_before_it_is_published() -> None:
+    source = _read(LIFECYCLE_SCRIPT)
+
+    assert "$verifyArguments=@{RuntimeRoot=$runtimeRoot}" in source
+    assert 'if($Command-ne"configure"){' in source
+    assert "$verifyArguments.IntegrationRoot=$PSScriptRoot" in source
+    assert '"runtime_integrity"' in source
+
+
 def test_node_children_drop_injection_environment() -> None:
     bridge = _read(BRIDGE)
     proxy = _read(WORKSPACE_PROXY)

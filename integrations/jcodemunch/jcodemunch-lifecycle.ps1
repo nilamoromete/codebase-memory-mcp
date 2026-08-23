@@ -190,40 +190,48 @@ function ConvertFrom-JCodeMunchMcpResponse {
 }
 function Probe-Runtime {
     param([int]$Port)
+    $probeStage="token"
     $token=Get-JCodeMunchSecret -StateRoot $StateRoot
-    if([string]::IsNullOrWhiteSpace($token)){return $null}
+    if([string]::IsNullOrWhiteSpace($token)){Write-Diagnostic -Event "runtime_probe_failed" -Level "debug" -Details @{stage=$probeStage;reason="missing_token";port=$Port};return $null}
     $endpoint="http://127.0.0.1:$Port/mcp"
     $headers=@{Authorization="Bearer $token";Accept="application/json, text/event-stream"}
     $sessionId=$null
     try{
+        $probeStage="initialize_request"
         $initialize=@{jsonrpc="2.0";id=1;method="initialize";params=@{protocolVersion="2025-03-26";capabilities=@{};clientInfo=@{name="jcodemunch-lifecycle-probe";version="1"}}}|ConvertTo-Json -Depth 8 -Compress
         $initializeResponse=Invoke-WebRequest -Method Post -Uri $endpoint -Headers $headers -ContentType "application/json" -Body $initialize -TimeoutSec 3
+        $probeStage="initialize_response"
         $initializeMessage=ConvertFrom-JCodeMunchMcpResponse $initializeResponse
-        if($null -eq $initializeMessage -or $null -eq $initializeMessage.result -or [string]$initializeMessage.result.serverInfo.name -ne "jcodemunch-mcp"){return $null}
+        if($null -eq $initializeMessage -or $null -eq $initializeMessage.result -or [string]$initializeMessage.result.serverInfo.name -ne "jcodemunch-mcp"){throw "invalid_initialize_response"}
         $sessionId=[string]$initializeResponse.Headers["Mcp-Session-Id"]
-        if([string]::IsNullOrWhiteSpace($sessionId)){return $null}
+        if([string]::IsNullOrWhiteSpace($sessionId)){throw "missing_session_id"}
         $headers["Mcp-Session-Id"]=$sessionId
+        $probeStage="initialized_notification"
         $initialized=@{jsonrpc="2.0";method="notifications/initialized"}|ConvertTo-Json -Compress
         $initializedResponse=Invoke-WebRequest -Method Post -Uri $endpoint -Headers $headers -ContentType "application/json" -Body $initialized -TimeoutSec 3
-        if([int]$initializedResponse.StatusCode -ne 202){return $null}
+        if([int]$initializedResponse.StatusCode -ne 202){throw "invalid_initialized_status"}
+        $probeStage="identity_request"
         $read=@{jsonrpc="2.0";id=2;method="resources/read";params=@{uri="munch://runtime/identity"}}|ConvertTo-Json -Depth 5 -Compress
         $readResponse=Invoke-WebRequest -Method Post -Uri $endpoint -Headers $headers -ContentType "application/json" -Body $read -TimeoutSec 3
+        $probeStage="identity_response"
         $readMessage=ConvertFrom-JCodeMunchMcpResponse $readResponse
         $identityText=[string]$readMessage.result.contents[0].text
-        if([string]::IsNullOrWhiteSpace($identityText)){return $null}
+        if([string]::IsNullOrWhiteSpace($identityText)){throw "missing_identity"}
         $identity=$identityText|ConvertFrom-Json -ErrorAction Stop
         $manifest=Get-Content -LiteralPath (Join-Path $PSScriptRoot "versions.json") -Raw|ConvertFrom-Json
-        if([string]$identity.schema -ne "munch.runtime.identity/v1" -or [string]$identity.product -ne "jcodemunch-mcp" -or [string]$identity.version -ne [string]$manifest.jcodemunch.version -or [string]$identity.transport -ne "streamable-http" -or [string]::IsNullOrWhiteSpace([string]$identity.instance_id) -or [string]::IsNullOrWhiteSpace([string]$identity.launch_id)){return $null}
+        if([string]$identity.schema -ne "munch.runtime.identity/v1" -or [string]$identity.product -ne "jcodemunch-mcp" -or [string]$identity.version -ne [string]$manifest.jcodemunch.version -or [string]$identity.transport -ne "streamable-http" -or [string]::IsNullOrWhiteSpace([string]$identity.instance_id) -or [string]::IsNullOrWhiteSpace([string]$identity.launch_id)){throw "identity_contract_mismatch"}
+        $probeStage="process_identity"
         $runtimePid=0
-        if(-not[int]::TryParse([string]$identity.pid,[ref]$runtimePid)-or$runtimePid-lt1){return $null}
+        if(-not[int]::TryParse([string]$identity.pid,[ref]$runtimePid)-or$runtimePid-lt1){throw "invalid_runtime_pid"}
         $snapshot=Get-ProcessSnapshot $runtimePid
-        if($null -eq $snapshot){return $null}
+        if($null -eq $snapshot){throw "missing_process_snapshot"}
+        $probeStage="listener_identity"
         $listener=@(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue|Where-Object{$_.LocalAddress -eq "127.0.0.1" -and [int]$_.OwningProcess -eq $runtimePid})
-        if($listener.Count -ne 1){return $null}
+        if($listener.Count -ne 1){throw "listener_identity_mismatch"}
         $commandMaterial=if(-not[string]::IsNullOrWhiteSpace([string]$snapshot.command_line)){[string]$snapshot.command_line}else{[string]$snapshot.executable_path}
         $fingerprint="sha256:"+[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($commandMaterial))).ToLowerInvariant()
         return [pscustomobject]@{server_name="jcodemunch";runtime_version=[string]$identity.version;transport="streamable-http";bind_host="127.0.0.1";port=$Port;pid=$runtimePid;launch_id=[string]$identity.launch_id;runtime_identity=[string]$identity.instance_id;command_fingerprint=$fingerprint;runtime_process_start=$identity.process_start}
-    }catch{return $null}
+    }catch{Write-Diagnostic -Event "runtime_probe_failed" -Level "debug" -Details @{stage=$probeStage;reason=$_.Exception.Message;port=$Port};return $null}
     finally{
         if(-not[string]::IsNullOrWhiteSpace($sessionId)){
             try{Invoke-WebRequest -Method Delete -Uri $endpoint -Headers $headers -TimeoutSec 2|Out-Null}catch{}
@@ -356,7 +364,8 @@ function Invoke-PortProbe {
     catch {
         $source=$_.Exception;$code=$null
         while($null -eq $code -and $null -ne $source){if($null -ne $source.Data["code"]){$code=[string]$source.Data["code"]};$source=$source.InnerException}
-        if($code -in @("runtime_unavailable","probe_ownership_mismatch","bootstrap_cleanup_failed")){throw}
+        Write-Diagnostic -Event "port_probe_failed" -Level "debug" -Details @{port=$Port;code=$code;reason=$_.Exception.Message}
+        if($code -in @("runtime_integrity","runtime_unavailable","probe_ownership_mismatch","bootstrap_cleanup_failed")){throw}
         return $false
     }
     finally {Stop-PortProbe $probe}
@@ -707,9 +716,13 @@ function Start-Runtime {
         }else{
             $manifest=Get-Content -LiteralPath (Join-Path $PSScriptRoot "versions.json") -Raw -Encoding utf8|ConvertFrom-Json
             $runtimeRoot=Join-Path $StateRoot "runtimes"
-            $verifyArguments=@{RuntimeRoot=$runtimeRoot;IntegrationRoot=$PSScriptRoot}
-            if($Command-ne"configure"){$verifyArguments.ReceiptPath=Join-Path $StateRoot "install-receipt.json"}
-            $verified=& (Join-Path $PSScriptRoot "verify-runtime.ps1") @verifyArguments
+            $verifyArguments=@{RuntimeRoot=$runtimeRoot}
+            if($Command-ne"configure"){
+                $verifyArguments.IntegrationRoot=$PSScriptRoot
+                $verifyArguments.ReceiptPath=Join-Path $StateRoot "install-receipt.json"
+            }
+            try{$verified=& (Join-Path $PSScriptRoot "verify-runtime.ps1") @verifyArguments}
+            catch{Throw-LifecycleError "runtime_integrity" "The pinned companion composition failed prelaunch verification." @{reason=$_.Exception.Message}}
             if($LASTEXITCODE-ne0){Throw-LifecycleError "runtime_integrity" "The pinned companion composition failed prelaunch verification."}
             $versionRoot=Join-Path (Join-Path $runtimeRoot ([string]$manifest.jcodemunch.package)) ([string]$manifest.jcodemunch.version)
             $exe=Join-Path $versionRoot (([string]$manifest.jcodemunch.executable) -replace '/', [IO.Path]::DirectorySeparatorChar)
