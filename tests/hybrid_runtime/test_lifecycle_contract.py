@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 
@@ -124,6 +125,18 @@ def test_runtime_launch_disables_python_bytecode_writes() -> None:
     assert "previousRuntimeEnvironment" in source
     for name in ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONNOUSERSITE"):
         assert name in source
+
+
+def test_runtime_startup_budget_covers_verified_windows_cold_start() -> None:
+    source = _read(LIFECYCLE_SCRIPT)
+    match = re.search(r"\$RuntimeStartupTimeoutMilliseconds\s*=\s*(\d+)", source)
+
+    assert match is not None
+    assert int(match.group(1)) >= 30_000
+    assert (
+        "$clock.ElapsedMilliseconds -lt $RuntimeStartupTimeoutMilliseconds"
+        in source
+    )
 
 
 def test_node_children_drop_injection_environment() -> None:

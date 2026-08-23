@@ -3,6 +3,7 @@
 param([Parameter(Mandatory=$true)][ValidateSet("configure","acquire","release","heartbeat","status","stop","clean","rollback")][string]$Command,[string]$StateRoot,[string]$ConfigRoot,[string]$Client,[string]$SessionId,[string]$WorkspaceRoot,[int]$ClientPid=0,[string[]]$CandidatePorts,[string[]]$CandidateRanges,[string[]]$DenylistedPorts,[string[]]$ReservedRanges,[string[]]$DynamicRanges,[string[]]$ExcludedRanges,[string]$CodexConfig,[string]$ClaudeConfig,[string]$ClaudeSettingsConfig,[string]$PiConfig,[string]$PiSettingsConfig,[string]$IntegrationRoot,[string[]]$SourceAssetPaths=@(),[switch]$ApplyClientConfigs,[int]$FailureInjectionAfterWrites=0,[int]$GraceSeconds=600,[string]$ExpectedShutdownGeneration,[switch]$Now,[switch]$ReselectPort,[string]$OwnershipFixture,[switch]$Json)
 Set-StrictMode -Version Latest
 $ErrorActionPreference="Stop"
+$RuntimeStartupTimeoutMilliseconds=30000
 if ([string]::IsNullOrWhiteSpace($StateRoot)) { if ([Environment]::GetEnvironmentVariable("JCODEMUNCH_LIFECYCLE_TEST_MODE") -eq "1") { throw "StateRoot is required in TEST_MODE." }; $StateRoot=Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "CodebaseMemoryMcp\companions\jcodemunch" }
 if ([string]::IsNullOrWhiteSpace($ConfigRoot)) { $ConfigRoot=$StateRoot }
 Import-Module (Join-Path $PSScriptRoot "JCodeMunchLifecycle.psm1") -Force
@@ -730,7 +731,7 @@ function Start-Runtime {
     $i=$null
     $runtimePid=0
     $clock=[Diagnostics.Stopwatch]::StartNew()
-    while($clock.ElapsedMilliseconds -lt 8000){
+    while($clock.ElapsedMilliseconds -lt $RuntimeStartupTimeoutMilliseconds){
         Start-Sleep -Milliseconds 100
         foreach($entry in @(Get-LaunchedProcessDescendants $launcherSnapshot)){$launchedDescendants["$([int]$entry.snapshot.pid)|$([string]$entry.snapshot.process_start_time)"]=$entry}
         $i=Probe-Runtime $Port
