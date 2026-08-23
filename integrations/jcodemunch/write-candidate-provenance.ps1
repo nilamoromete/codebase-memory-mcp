@@ -48,6 +48,10 @@ foreach($argument in @("scripts/build.sh","--with-ui","--version",$head,"BUILD_D
 if([OperatingSystem]::IsWindows()){
     [void]$buildArguments.Add("CC=/clang64/bin/clang.exe")
     [void]$buildArguments.Add("CXX=/clang64/bin/clang++.exe")
+    $npmCommand=(Get-Command npm.cmd -ErrorAction Stop).Source
+    if($npmCommand-notmatch'^(?<drive>[A-Za-z]):\\(?<tail>.+)$'){throw "Unable to translate npm.cmd into an MSYS path: $npmCommand"}
+    $msysNpm="/$($Matches.drive.ToLowerInvariant())/$($Matches.tail.Replace('\','/'))"
+    [void]$buildArguments.Add("NPM=`"$msysNpm`"")
 }
 $buildStarted=[DateTime]::UtcNow
 $start=[Diagnostics.ProcessStartInfo]::new();$start.FileName=$bash;$start.WorkingDirectory=$source

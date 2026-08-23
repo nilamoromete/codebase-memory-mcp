@@ -131,6 +131,8 @@ def test_candidate_provenance_is_emitted_only_by_the_canonical_clean_build() -> 
         "scripts/build.sh",
         "build/attested-candidate",
         '"--with-ui"',
+        "npm.cmd",
+        'NPM=`"$msysNpm`"',
         '"--version"',
         "HEAD^{tree}",
         "post_build_worktree_clean",

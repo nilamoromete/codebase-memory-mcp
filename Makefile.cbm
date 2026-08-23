@@ -1055,6 +1055,8 @@ cbm: $(BUILD_DIR)/codebase-memory-mcp
 
 # ── Build with embedded UI (requires Node.js) ───────────────────
 
+NPM ?= npm
+
 # Swap embedded_stub.c for the generated embedded_assets.c
 UI_SRCS_WITH_ASSETS = $(subst src/ui/embedded_stub.c,src/ui/embedded_assets.c,$(UI_SRCS))
 PROD_SRCS_WITH_ASSETS = $(subst src/ui/embedded_stub.c,src/ui/embedded_assets.c,$(PROD_SRCS))
@@ -1063,7 +1065,7 @@ PROD_SRCS_WITH_ASSETS = $(subst src/ui/embedded_stub.c,src/ui/embedded_assets.c,
 EMBED_OBJS = $(wildcard $(BUILD_DIR)/embedded/embed_*.o)
 
 frontend:
-	cd graph-ui && npm ci && npm run build
+	cd graph-ui && $(NPM) ci && $(NPM) run build
 
 embed: frontend
 	scripts/embed-frontend.sh graph-ui/dist $(BUILD_DIR)/embedded
