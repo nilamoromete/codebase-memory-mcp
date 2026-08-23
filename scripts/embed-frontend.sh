@@ -19,11 +19,15 @@ OUTPUT_DIR="${2:?Usage: embed-frontend.sh <dist_dir> <output_dir>}"
 rm -rf "$OUTPUT_DIR"
 mkdir -p "$OUTPUT_DIR"
 
-# Detect platform — Linux uses ld -r -b binary, everything else uses xxd+cc
+# Select the object format from the target compiler, not the host shell.
+# A Windows cross-build may run under a shell whose uname reports Linux; using
+# host detection there emits ELF objects that the Windows linker cannot read.
+# Fall back to the portable C-array path when the compiler target is unknown.
+COMPILER_TARGET="$(${CC:-cc} -dumpmachine 2>/dev/null || true)"
 IS_LINUX=false
-if [[ "$(uname -s)" == "Linux" ]] && ! [[ "$(uname -s)" =~ MINGW|MSYS ]]; then
-    IS_LINUX=true
-fi
+case "$COMPILER_TARGET" in
+    *linux*) IS_LINUX=true ;;
+esac
 
 # Content-type detection
 content_type_for() {

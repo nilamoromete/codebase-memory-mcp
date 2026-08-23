@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 
 REPO_ROOT = Path(__file__).parents[2]
@@ -12,10 +16,48 @@ LIFECYCLE = INTEGRATION / "jcodemunch-lifecycle.ps1"
 TRANSACTION = INTEGRATION / "HybridInstallTransaction.psm1"
 PROVENANCE = INTEGRATION / "write-candidate-provenance.ps1"
 INTEGRATION_MANIFEST = INTEGRATION / "write-integration-manifest.ps1"
+EMBED_FRONTEND = REPO_ROOT / "scripts" / "embed-frontend.sh"
 
 
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def test_embed_uses_compiler_target_when_shell_and_target_platform_differ(tmp_path: Path) -> None:
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is required for the frontend embedding regression")
+
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "src" / "ui").mkdir(parents=True)
+    (tmp_path / "dist").mkdir()
+    shutil.copy2(EMBED_FRONTEND, tmp_path / "scripts" / "embed-frontend.sh")
+    (tmp_path / "dist" / "probe.txt").write_text("probe", encoding="utf-8")
+
+    fake_cc = tmp_path / "fake-cc.sh"
+    fake_cc.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ \"${1:-}\" == '-dumpmachine' ]]; then printf 'x86_64-w64-windows-gnu\\n'; exit 0; fi\n"
+        "out=''\n"
+        "while [[ $# -gt 0 ]]; do\n"
+        "  if [[ \"$1\" == '-o' ]]; then shift; out=\"$1\"; fi\n"
+        "  shift\n"
+        "done\n"
+        "printf 'coff-probe' > \"$out\"\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    command = (
+        "uname() { printf 'Linux\\n'; }; export -f uname; "
+        "export CC='bash fake-cc.sh'; "
+        "scripts/embed-frontend.sh dist build/embedded"
+    )
+    subprocess.run([bash, "-lc", command], cwd=tmp_path, check=True, capture_output=True, text=True)
+
+    generated = _read(tmp_path / "src" / "ui" / "embedded_assets.c")
+    assert "_binary_probe_txt_data" in generated
+    assert "_binary_probe_txt_start" not in generated
+    assert (tmp_path / "build" / "embedded" / "embed_probe_txt.o").read_bytes() == b"coff-probe"
 
 
 def test_installer_cuts_over_all_three_clients_and_commits_receipt_last() -> None:
